@@ -1,10 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_inappwebview_platform_interface/flutter_inappwebview_platform_interface.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter/widgets.dart';
 import 'package:mobile_app/main.dart';
 
 class MockInAppWebViewWidget extends PlatformInAppWebViewWidget {
-  MockInAppWebViewWidget(PlatformInAppWebViewWidgetCreationParams params) : super.implementation(params);
+  MockInAppWebViewWidget(super.params) : super.implementation();
 
   @override
   Widget build(BuildContext context) {
