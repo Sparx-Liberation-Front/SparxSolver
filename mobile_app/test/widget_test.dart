@@ -36,6 +36,6 @@ void main() {
 
   testWidgets('App load test', (WidgetTester tester) async {
     await tester.pumpWidget(const SparxSolverApp());
-    expect(find.text('SparxSolver Mobile'), findsOneWidget);
+    expect(find.text('SparxSolver'), findsOneWidget);
   });
 }
