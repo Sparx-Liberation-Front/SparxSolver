@@ -27,6 +27,40 @@ app.get('/', (req, res) => {
 let browserContext: BrowserContext | null = null;
 let automationRunning = false;
 
+type AgentSettings = {
+  minDelaySeconds: number;
+  maxDelaySeconds: number;
+  requestTimeoutSeconds: number;
+  retryDelaySeconds: number;
+  maxRequestAttempts: number;
+};
+
+let agentSettings: AgentSettings = {
+  minDelaySeconds: 2,
+  maxDelaySeconds: 20,
+  requestTimeoutSeconds: 45,
+  retryDelaySeconds: 2,
+  maxRequestAttempts: 3
+};
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
+function updateAgentSettings(input: any): AgentSettings {
+  const minDelaySeconds = boundedNumber(input?.minDelaySeconds, agentSettings.minDelaySeconds, 0, 120);
+  const maxDelaySeconds = boundedNumber(input?.maxDelaySeconds, agentSettings.maxDelaySeconds, minDelaySeconds, 300);
+  agentSettings = {
+    minDelaySeconds,
+    maxDelaySeconds,
+    requestTimeoutSeconds: boundedNumber(input?.requestTimeoutSeconds, agentSettings.requestTimeoutSeconds, 10, 300),
+    retryDelaySeconds: boundedNumber(input?.retryDelaySeconds, agentSettings.retryDelaySeconds, 0, 60),
+    maxRequestAttempts: Math.round(boundedNumber(input?.maxRequestAttempts, agentSettings.maxRequestAttempts, 1, 10))
+  };
+  return agentSettings;
+}
+
 export function setContext(context: BrowserContext) {
   browserContext = context;
 }
@@ -35,6 +69,7 @@ app.post('/start', (req, res) => {
   console.log('[Server] Received /start POST request from extension.');
   const apiKeys = req.body.apiKeys;
   const apiKey = req.body.apiKey; // Fallback for backwards compatibility
+  updateAgentSettings(req.body.settings || {});
   
   const keys = apiKeys || (apiKey ? [apiKey] : []);
   
@@ -64,10 +99,21 @@ app.get('/stop', (req, res) => {
   res.send('Stopped');
 });
 
+app.get('/settings', (req, res) => {
+  res.json({ settings: agentSettings });
+});
+
+app.post('/settings', (req, res) => {
+  const settings = updateAgentSettings(req.body || {});
+  console.log('[Server] AI settings updated:', settings);
+  res.json({ settings });
+});
+
 import { toolDeclarations, systemInstruction, fallbackModels } from './engineCore';
 
 const playwright_click = toolDeclarations.find(t => t.name === 'playwright_click') as any;
 const playwright_fill = toolDeclarations.find(t => t.name === 'playwright_fill') as any;
+const batch_interactions = toolDeclarations.find(t => t.name === 'batch_interactions') as any;
 const get_screenshot_and_html = toolDeclarations.find(t => t.name === 'get_screenshot_and_html') as any;
 const task_done = toolDeclarations.find(t => t.name === 'task_done') as any;
 const calculate_answer = toolDeclarations.find(t => t.name === 'calculate_answer') as any;
@@ -232,6 +278,81 @@ app.delete('/bookwork/:code', (req, res) => {
   res.json({ status: 'cleared_single', code });
 });
 
+async function executeBatchInteractions(page: Page, actions: any[]): Promise<any> {
+  const results: any[] = [];
+  const normalise = (value: string) => value
+    .replace(/\s+/g, '')
+    .replace(/[\u2212\u2013\u2014]/g, '-')
+    .replace(/\\frac\{(\d+)\}\{(\d+)\}/g, '$1/$2');
+
+  for (const [index, action] of actions.entries()) {
+    if (!action || !['click', 'fill'].includes(action.action) || typeof action.selector !== 'string') {
+      results.push({ index, error: 'Invalid action. Use click/fill with a selector.' });
+      continue;
+    }
+
+    const element = page.locator(action.selector).first();
+    if (await element.count() === 0) {
+      results.push({ index, error: `Selector ${action.selector} not found.` });
+      continue;
+    }
+
+    if (action.action === 'click') {
+      await element.click({ force: true });
+      await page.waitForTimeout(350);
+      results.push({ index, status: 'clicked' });
+      continue;
+    }
+
+    const value = String(action.value ?? '').trim();
+    const editable = await element.evaluate((node: Element) => {
+      const tag = node.tagName.toLowerCase();
+      return (tag === 'input' && ['text', 'number', 'search', ''].includes((node as HTMLInputElement).type?.toLowerCase() || '')) ||
+        tag === 'textarea' || (node as HTMLElement).isContentEditable;
+    });
+
+    if (editable) {
+      await element.fill(value);
+      results.push({ index, status: 'filled' });
+      continue;
+    }
+
+    await element.click({ force: true });
+    await page.waitForTimeout(500);
+    const tiles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role="button"], [tabindex="0"], [tabindex="-1"]'))
+      .map((node, tileIndex) => ({
+        selector: `[data-batch-tile="${tileIndex}"]`,
+        text: node.querySelector('.katex-mathml annotation')?.textContent?.trim() || (node as HTMLElement).innerText?.trim().replace(/\s+/g, '') || '',
+        node
+      }))
+      .filter(tile => tile.text)
+      .map(tile => {
+        tile.node.setAttribute('data-batch-tile', String(tile.selector.match(/(\d+)"\]$/)?.[1] || '0'));
+        return { selector: tile.selector, text: tile.text };
+      }));
+    const exact = tiles.find(tile => normalise(tile.text) === normalise(value));
+    if (exact) {
+      await page.locator(exact.selector).first().click({ force: true });
+      results.push({ index, status: 'filled' });
+      continue;
+    }
+
+    let matched = true;
+    for (const character of value) {
+      const tile = tiles.find(candidate => normalise(candidate.text) === normalise(character));
+      if (!tile) {
+        matched = false;
+        break;
+      }
+      await page.locator(tile.selector).first().click({ force: true });
+      await page.waitForTimeout(120);
+    }
+    results.push({ index, status: matched ? 'filled' : 'no matching keypad tile' });
+  }
+
+  return { results, completed: results.every(result => !result.error && result.status !== 'no matching keypad tile') };
+}
+
 
 
 
@@ -255,9 +376,11 @@ async function startAutomation(apiKeys: string[]) {
 
       console.log('[Automation] Starting new session to solve the current question...');
       currentCalculation = null;
+      let bookworkLookup: { code: string, found: boolean } | null = null;
+      let isBookworkCheck = false;
       
       const config = {
-        tools: [{ functionDeclarations: [playwright_click, playwright_fill, playwright_evaluate, get_screenshot_and_html, task_done, calculate_answer, get_bookwork_answer] }],
+        tools: [{ functionDeclarations: [playwright_click, playwright_fill, batch_interactions, playwright_evaluate, get_screenshot_and_html, task_done, calculate_answer, get_bookwork_answer] }],
         systemInstruction: [
           "You are a Sparx Maths agent. There are TWO types of screen you will encounter:",
 
@@ -268,14 +391,15 @@ async function startAutomation(apiKeys: string[]) {
           "2) Read the bookwork code requested (e.g. '4B' or '12').",
           "3) Call get_bookwork_answer(bookwork_code) to retrieve the saved answer for that code.",
           "4) Compare the retrieved answer against all interactive elements / options on the screen. Match by value, LaTeX expression, or text (e.g. '5', 'x = 2', '1/2', '3.14').",
-          "5) Click the button / option matching the saved answer using playwright_click.",
-          "6) If a 'Submit' or 'Continue' button appears, click it with playwright_click.",
+          "5) Call batch_interactions once with the matching option and any visible Submit/Continue click in order.",
           "7) Call task_done.",
-          "IMPORTANT: Do NOT call calculate_answer on bookwork check screens. Always look up and select the stored bookwork answer.",
+          "IMPORTANT: Do NOT call calculate_answer on bookwork check screens. Always look up and select the stored bookwork answer. Do not call task_done until get_bookwork_answer has returned found:true.",
 
           "-- TYPE 2: NORMAL QUESTION --",
           "Detected when the page shows a new maths question to solve.",
-          "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with concise, line-by-line working, a final verification line beginning with 'Check:', and a random human-like delay range (min_human_delay_seconds, max_human_delay_seconds). Wrap every mathematical expression in $...$ for KaTeX. YOU MUST WAIT FOR THE SERVER TO FINISH THE DELAY. DO NOT call any other tool (like playwright_fill or playwright_click) until the calculate_answer tool response returns successfully after the wait. 3) AFTER the calculate_answer wait, fill every answer slot with playwright_fill EXACTLY ONCE per slot. 4) Call task_done with bookwork_code AND answer.",
+          "GRAPH QUESTIONS: If a graph, chart, coordinate grid, canvas, SVG, or plotted image is visible, inspect the graph crop carefully. Read the axis labels, scale, origin, grid spacing, plotted points, intercepts, and line direction explicitly before calculating. Do not estimate from visual size alone; cross-check coordinates against tick spacing and state the coordinates in your working. If a label or point is unreadable, do not guess: inspect the DOM text or request another screenshot first.",
+          "BATCH ACTIONS: After calculating an answer, call batch_interactions once with all answer-box fills and required clicks in their exact order. This saves requests and avoids repeating the same tool call. Do not batch actions until the latest screenshot has provided valid selectors. On bookwork checks, use one batch for the matching option and Continue/Submit click if both are visible.",
+          "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with concise, line-by-line working, a final verification line beginning with 'Check:', and a random human-like delay range (min_human_delay_seconds, max_human_delay_seconds). Wrap every mathematical expression in $...$ for KaTeX. YOU MUST WAIT FOR THE SERVER TO FINISH THE DELAY. DO NOT call any other tool until the calculate_answer tool response returns successfully after the wait. 3) AFTER the calculate_answer wait, call batch_interactions once with every answer-box fill in order. 4) Call task_done with bookwork_code AND answer.",
 
           "-- FILLING SLOTS (playwright_fill rules) --",
           "The server auto-handles clicking tiles or typing. For equations like y=mx+c, there are SEPARATE slots for gradient, sign (+/-), and intercept - fill each independently.",
@@ -288,7 +412,7 @@ async function startAutomation(apiKeys: string[]) {
           "Instead: read the interactiveElements list returned by playwright_click, find the dropdown option you want, and call playwright_click with its data-ai-id immediately.",
 
           "-- task_done requirements --",
-          "Always provide bookwork_code and answer when finishing a normal question, so the answer is saved for future bookwork checks.",
+          "Before task_done on EVERY normal question, verify that the bookwork code is visible and provide both bookwork_code and the exact final answer. The server will reject task_done if either is missing, so call get_screenshot_and_html again and recover the code rather than finishing without saving it.",
           "FORMATTING: Format mathematical expressions in answer and working using KaTeX / LaTeX syntax, e.g. '$x = 2$', '$\\frac{1}{2}$', '$y = 3x + 5$', '$15.4$'. Keep working compact: one operation per line, no essay paragraphs, and finish with a 'Check:' substitution line."
         ].join('\n')
       };
@@ -308,18 +432,26 @@ async function startAutomation(apiKeys: string[]) {
         let response: any;
         let success = false;
         let genericErrorAttempts = 0;
-        
-        while (automationRunning && !success) {
+
+        while (automationRunning && !success && genericErrorAttempts < agentSettings.maxRequestAttempts) {
           try {
+            genericErrorAttempts++;
             updateStatus(`Querying ${fallbackModels[currentModelIndex]} (Key ${currentKeyIndex + 1}/${apiKeys.length})...`, 'info');
-            response = await ai.models.generateContent({
-              model: fallbackModels[currentModelIndex],
-              contents: contents,
-              config: config
-            });
+            response = await Promise.race([
+              ai.models.generateContent({
+                model: fallbackModels[currentModelIndex],
+                contents: contents,
+                config: config
+              }),
+              new Promise((_, reject) => setTimeout(
+                () => reject(new Error(`Gemini request timed out after ${agentSettings.requestTimeoutSeconds}s`)),
+                agentSettings.requestTimeoutSeconds * 1000
+              ))
+            ]);
             success = true;
-            genericErrorAttempts = 0;
           } catch (e: any) {
+            updateStatus(`Gemini request failed (${genericErrorAttempts}/${agentSettings.maxRequestAttempts}): ${e.message}`, 'warn');
+            if (genericErrorAttempts >= agentSettings.maxRequestAttempts) break;
             currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
             if (currentKeyIndex === 0) {
               currentModelIndex = (currentModelIndex + 1) % fallbackModels.length;
@@ -330,7 +462,16 @@ async function startAutomation(apiKeys: string[]) {
             
             // Re-initialize AI with next key immediately
             ai = new GoogleGenAI({ apiKey: apiKeys[currentKeyIndex] });
+            if (agentSettings.retryDelaySeconds > 0) {
+              await new Promise(r => setTimeout(r, agentSettings.retryDelaySeconds * 1000));
+            }
           }
+        }
+
+        if (!success) {
+          updateStatus(`Gemini unavailable after ${agentSettings.maxRequestAttempts} attempts. Retrying this question later.`, 'warn');
+          await new Promise(r => setTimeout(r, agentSettings.retryDelaySeconds * 1000));
+          continue;
         }
 
         if (!automationRunning) break;
@@ -362,7 +503,13 @@ async function startAutomation(apiKeys: string[]) {
         if (!page) throw new Error("Browser page lost.");
 
         try {
-          if (toolCall.name === 'playwright_click') {
+          if (toolCall.name === 'batch_interactions') {
+            const actions = Array.isArray(toolCall.args?.actions) ? toolCall.args.actions.slice(0, 30) : [];
+            toolResult = actions.length
+              ? await executeBatchInteractions(page, actions)
+              : { error: 'No actions supplied. Provide an ordered actions array.' };
+          }
+          else if (toolCall.name === 'playwright_click') {
             const el = page.locator(toolCall.args.selector as string).first();
             if (await el.count() > 0) {
               await el.click({ force: true });
@@ -609,8 +756,10 @@ async function startAutomation(apiKeys: string[]) {
           else if (toolCall.name === 'calculate_answer') {
             const working = toolCall.args.step_by_step_working as string;
             const final = toolCall.args.final_answer as string;
-            const minSec = Math.max(1, parseInt(toolCall.args.min_human_delay_seconds || '5', 10));
-            const maxSec = Math.max(minSec, parseInt(toolCall.args.max_human_delay_seconds || '15', 10));
+            const requestedMin = Math.max(0, parseInt(toolCall.args.min_human_delay_seconds || '5', 10));
+            const requestedMax = Math.max(requestedMin, parseInt(toolCall.args.max_human_delay_seconds || '15', 10));
+            const minSec = Math.min(agentSettings.maxDelaySeconds, Math.max(agentSettings.minDelaySeconds, requestedMin));
+            const maxSec = Math.min(agentSettings.maxDelaySeconds, Math.max(minSec, requestedMax));
 
             console.log(`[Agent] 🧮 Gemini Calculation:\nWorking: ${working}\nFinal Answer: ${final}`);
 
@@ -633,12 +782,15 @@ async function startAutomation(apiKeys: string[]) {
             toolResult = { status: "Calculation saved and verified. Now proceed to enter this exact answer using the correct button IDs." };
           }
           else if (toolCall.name === 'get_bookwork_answer') {
+            isBookworkCheck = true;
             const code = String(toolCall.args.bookwork_code || '').trim();
             const entry = bookworks.find(b => b.code.trim().toLowerCase() === code.toLowerCase());
             if (entry) {
+              bookworkLookup = { code, found: true };
               console.log(`[Agent] 📖 Bookwork lookup: code="${code}" → answer="${entry.answer}"`);
               toolResult = { found: true, bookwork_code: entry.code, answer: entry.answer };
             } else {
+              bookworkLookup = { code, found: false };
               console.log(`[Agent] 📖 Bookwork lookup: code="${code}" - NOT FOUND in store (${bookworks.length} entries).`);
               // Return the full bookwork store so the agent can make an educated guess
               toolResult = {
@@ -685,7 +837,20 @@ async function startAutomation(apiKeys: string[]) {
                 return results;
               });
 
-              const screenshot = await page.screenshot();
+              const screenshot = await page.screenshot({ type: 'png', fullPage: true });
+              const graphScreenshots: Buffer[] = [];
+              const graphTargets = target.locator('canvas, svg, img, [role="img"], [aria-label*="graph" i], [aria-label*="chart" i]');
+              const graphCount = Math.min(await graphTargets.count(), 3);
+              for (let index = 0; index < graphCount; index++) {
+                const graph = graphTargets.nth(index);
+                const box = await graph.boundingBox();
+                if (box && box.width >= 120 && box.height >= 100) {
+                  graphScreenshots.push(await graph.screenshot({ type: 'png' }));
+                }
+              }
+              const visualText = graphScreenshots.length
+                ? ' The full page screenshot is followed by high-resolution crops of each visible graph. For graph questions, use the crop to read labels and tick spacing.'
+                : ' No separate graph element was detected, so inspect the full page screenshot carefully for a graph drawn in regular HTML.';
               
               prompt = [
                 {
@@ -694,19 +859,36 @@ async function startAutomation(apiKeys: string[]) {
                     response: { interactiveElements: elementsSummary } 
                   }
                 },
-                { text: 'Here is the current screenshot of the page, along with a list of interactive elements and their extracted LaTeX/text:' },
-                { inlineData: { data: screenshot.toString("base64"), mimeType: 'image/png' } }
+                { text: `Here is the current screenshot of the page, along with a list of interactive elements and their extracted LaTeX/text.${visualText}` },
+                { inlineData: { data: screenshot.toString("base64"), mimeType: 'image/png' } },
+                ...graphScreenshots.flatMap((graphImage, index) => [
+                  { text: `Graph crop ${index + 1}: inspect this image at higher resolution. First transcribe its axes, scale, and key coordinates.` },
+                  { inlineData: { data: graphImage.toString('base64'), mimeType: 'image/png' } }
+                ])
               ];
               continue; 
             }
           }
           else if (toolCall.name === 'task_done') {
-            isDone = true;
             previousMemory = toolCall.args.memory_for_next_part || "";
             
             const bwCode = toolCall.args.bookwork_code;
             const bwAnswer = toolCall.args.answer;
-            if (bwCode && bwAnswer) {
+            if (bookworkLookup && !bookworkLookup.found) {
+              isDone = false;
+              toolResult = {
+                error: `Bookwork code "${bookworkLookup.code}" was not found in saved bookwork. Do not finish this check; solve/save the answer first or call get_screenshot_and_html again to identify the correct code.`
+              };
+            } else if (!isBookworkCheck && (!String(bwCode || '').trim() || !String(bwAnswer || '').trim())) {
+              isDone = false;
+              toolResult = {
+                error: 'Bookwork was not saved. This normal question requires a non-empty bookwork_code and answer. Call get_screenshot_and_html, identify the code, then call task_done again with both values.'
+              };
+            } else {
+              isDone = true;
+            }
+
+            if (isDone && bwCode && bwAnswer) {
               const codeLower = bwCode.trim().toLowerCase();
               if (deletedBookworks.has(codeLower)) {
                 deletedBookworks.delete(codeLower); // Reset if re-solved newly
@@ -724,12 +906,16 @@ async function startAutomation(apiKeys: string[]) {
               console.log(`[Agent] Saved Bookwork Code ${bwCode}: ${bwAnswer}`);
             }
             
-            toolResult = { status: "Task acknowledged as done." };
-            console.log(`[Agent] Task completed according to Gemini. Reason:`, toolCall.args.message);
-            if (previousMemory) {
-              console.log(`[Agent] Saved memory for next part:`, previousMemory);
+            if (isDone) {
+              toolResult = { status: "Task acknowledged as done. Bookwork was verified and saved." };
+              console.log(`[Agent] Task completed according to Gemini. Reason:`, toolCall.args.message);
+              if (previousMemory) {
+                console.log(`[Agent] Saved memory for next part:`, previousMemory);
+              } else {
+                console.log(`[Agent] No memory saved. Question fully finished.`);
+              }
             } else {
-              console.log(`[Agent] No memory saved. Question fully finished.`);
+              console.warn('[Agent] Refused task_done because bookwork verification failed.');
             }
           }
           

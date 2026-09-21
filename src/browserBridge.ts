@@ -386,6 +386,19 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
                 resultData = executeClick(call.args.selector);
             } else if (call.name === 'playwright_fill') {
                 resultData = await executeFill(call.args.selector, call.args.value);
+            } else if (call.name === 'batch_interactions') {
+                const actions = Array.isArray(call.args?.actions) ? call.args.actions.slice(0, 30) : [];
+                const results: any[] = [];
+                for (const [index, action] of actions.entries()) {
+                    if (action?.action === 'click') {
+                        results.push({ index, ...executeClick(action.selector) });
+                    } else if (action?.action === 'fill') {
+                        results.push({ index, ...await executeFill(action.selector, action.value) });
+                    } else {
+                        results.push({ index, error: 'Invalid batch action.' });
+                    }
+                }
+                resultData = { results, completed: results.every(result => !result.error) };
             } else if (call.name === 'playwright_evaluate') {
                 try {
                     const evalRes = eval(call.args.script);

@@ -1,18 +1,58 @@
 const apiKeysEl = document.getElementById("apiKeys");
-const save = document.getElementById("saveKey");
 const toggleKeys = document.getElementById("toggleKeys");
+const defaultSettings = {
+    minDelaySeconds: 2,
+    maxDelaySeconds: 20,
+    requestTimeoutSeconds: 45,
+    retryDelaySeconds: 2,
+    maxRequestAttempts: 3
+};
+
+function getSettingsFromForm() {
+    return Object.fromEntries(Object.keys(defaultSettings).map(key => [
+        key,
+        Math.max(0, Number(document.getElementById(key).value) || defaultSettings[key])
+    ]));
+}
+
+function setSettingsForm(settings) {
+    Object.keys(defaultSettings).forEach(key => {
+        document.getElementById(key).value = settings[key] ?? defaultSettings[key];
+    });
+}
 
 chrome.storage.local.get(
-    ["apiKeys"],
-    data => {
+    ["apiKeys", "aiSettings"],
+    async data => {
         apiKeysEl.value = data.apiKeys ?? "";
+        let settings = data.aiSettings || defaultSettings;
+        try {
+            const response = await fetch("http://localhost:3000/settings");
+            if (response.ok) settings = (await response.json()).settings;
+        } catch (e) {}
+        setSettingsForm(settings);
     }
 );
 
-save.onclick = () => {
-    chrome.storage.local.set({
-        apiKeys: apiKeysEl.value
-    });
+document.getElementById("saveSettings").onclick = async () => {
+    const settings = getSettingsFromForm();
+    const saved = document.getElementById("settingsSaved");
+    try {
+        const response = await fetch("http://localhost:3000/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(settings)
+        });
+        if (!response.ok) throw new Error("Server rejected settings");
+        const serverSettings = (await response.json()).settings;
+        setSettingsForm(serverSettings);
+        await chrome.storage.local.set({ apiKeys: apiKeysEl.value, aiSettings: serverSettings });
+        saved.textContent = "Saved";
+        setTimeout(() => { saved.textContent = ""; }, 2000);
+    } catch (error) {
+        saved.textContent = "Server offline: saved locally";
+        await chrome.storage.local.set({ apiKeys: apiKeysEl.value, aiSettings: settings });
+    }
 };
 
 toggleKeys.onchange = () => {
@@ -43,7 +83,7 @@ start.onclick = async () => {
                 headers: {
                     "Content-Type": "application/json"
                 },
-                body: JSON.stringify({ apiKeys: keysArray })
+                body: JSON.stringify({ apiKeys: keysArray, settings: getSettingsFromForm() })
             });
 
             if (!res.ok) {

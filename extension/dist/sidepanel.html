@@ -27,23 +27,25 @@
 <section class="card">
     <div id="statusIndicator" class="status-info">Status: Idle</div>
     
-    <h2>API Settings</h2>
+    <details class="settings-menu" open>
+        <summary>AI Settings</summary>
+        <label class="field-label" for="apiKeys">Gemini API keys</label>
+        <textarea id="apiKeys" class="censored" placeholder="One Gemini API key per line" rows="3"></textarea>
+        <label class="checkbox-label">
+            <input type="checkbox" id="toggleKeys"> Show API keys
+        </label>
 
-    <textarea
-        id="apiKeys"
-        class="censored"
-        placeholder="Enter Gemini API Keys (one per line)"
-        rows="4"
-        style="width: 100%; box-sizing: border-box; resize: vertical; margin-bottom: 10px;"
-    ></textarea>
-    
-    <label style="display: flex; align-items: center; margin-bottom: 10px;">
-        <input type="checkbox" id="toggleKeys" style="margin-right: 8px;"> Show API Keys
-    </label>
-
-    <button id="saveKey">
-        Save API Keys
-    </button>
+        <div class="settings-grid">
+            <label>Minimum thinking delay (seconds)<input id="minDelaySeconds" type="number" min="0" max="120" step="1"></label>
+            <label>Maximum thinking delay (seconds)<input id="maxDelaySeconds" type="number" min="0" max="300" step="1"></label>
+            <label>Gemini request timeout (seconds)<input id="requestTimeoutSeconds" type="number" min="10" max="300" step="1"></label>
+            <label>Wait between retries (seconds)<input id="retryDelaySeconds" type="number" min="0" max="60" step="1"></label>
+            <label>Maximum request attempts<input id="maxRequestAttempts" type="number" min="1" max="10" step="1"></label>
+        </div>
+        <p class="settings-help">Requests stop retrying after the limits above. Lower the timeout and attempts if Gemini is hanging.</p>
+        <button id="saveSettings">Save AI Settings</button>
+        <span id="settingsSaved" class="settings-saved" aria-live="polite"></span>
+    </details>
 </section>
 
 
