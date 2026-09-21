@@ -36,7 +36,7 @@ export const toolDeclarations = [
     parameters: {
       type: 'OBJECT',
       properties: {
-        step_by_step_working: { type: 'STRING', description: 'Your detailed mathematical working out. Double check your math!' },
+        step_by_step_working: { type: 'STRING', description: 'Concise, correct working out with one step per line. Wrap every mathematical expression in $...$ for KaTeX. Include a final line beginning with "Check:" that substitutes the answer back into the original question.' },
         final_answer: { type: 'STRING', description: 'The final calculated answer.' },
         min_human_delay_seconds: { type: 'INTEGER', description: 'Minimum estimated seconds an average human student would take to solve this question (e.g. 10).' },
         max_human_delay_seconds: { type: 'INTEGER', description: 'Maximum estimated seconds an average human student would take to solve this question (e.g. 30).' }
@@ -108,7 +108,7 @@ export const systemInstruction = [
 
   "-- task_done requirements --",
   "Always provide bookwork_code and answer when finishing a normal question, so the answer is saved for future bookwork checks.",
-  "FORMATTING: Format mathematical expressions in answer using KaTeX / LaTeX syntax, e.g. '$x = 2$', '$\\frac{1}{2}$', '$y = 3x + 5$', '$15.4$'. Wrap math in single dollar signs ($...$) so it renders nicely in KaTeX."
+  "FORMATTING: Format mathematical expressions in answer and working using KaTeX / LaTeX syntax, e.g. '$x = 2$', '$\\frac{1}{2}$', '$y = 3x + 5$', '$15.4$'. Keep working compact: one operation per line, no essay paragraphs, and finish with a 'Check:' substitution line."
 ].join('\n');
 
 export const fallbackModels = [

@@ -17,7 +17,7 @@
   "action": {
     "default_title": "Open Sparx Solver",
     "default_icon": {
-      "400": "logo.jpg"
+      "400": "logo.png"
     }
   },
 
@@ -26,7 +26,7 @@
   },
 
   "icons": {
-    "400": "logo.jpg"
+    "400": "logo.png"
   },
 
   "content_scripts": [

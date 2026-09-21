@@ -108,127 +108,208 @@ setInterval(async () => {
 }, 1000);
 
 let currentBookworkMemory = {};
+let openBookworkCode = null;
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function normaliseBookwork(value, code) {
+    if (typeof value === "string") {
+        return { code, answer: value, working: "", info: "" };
+    }
+    return {
+        code: value.code || code,
+        answer: value.answer || "",
+        working: value.working || "",
+        info: value.info || "",
+        savedAt: value.savedAt || ""
+    };
+}
+
+function mathMarkup(value) {
+    const text = escapeHtml(value);
+    if (text.includes("$") || text.includes("\\(") || text.includes("\\[")) return text;
+    if (/\\(frac|sqrt|times|cdot|pm|leq|geq|text)\b/.test(text)) return `$${text}$`;
+    if (/=/.test(text) && !/^Check:/i.test(text)) return `$${text}$`;
+    return text;
+}
+
+function renderKatex(root) {
+    if (!window.renderMathInElement) return;
+    try {
+        window.renderMathInElement(root, {
+            delimiters: [
+                { left: '$$', right: '$$', display: true },
+                { left: '$', right: '$', display: false },
+                { left: '\\(', right: '\\)', display: false },
+                { left: '\\[', right: '\\]', display: true }
+            ],
+            throwOnError: false
+        });
+    } catch (e) {
+        console.error("KaTeX rendering error:", e);
+    }
+}
+
+async function syncBookworks() {
+    try {
+        await fetch("http://localhost:3000/bookwork", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ bookworks: Object.values(currentBookworkMemory) })
+        });
+    } catch (e) {}
+}
 
 function renderBookworkUI(bookworkMap) {
-    currentBookworkMemory = { ...bookworkMap };
+    currentBookworkMemory = Object.fromEntries(
+        Object.entries(bookworkMap).map(([code, value]) => [code, normaliseBookwork(value, code)])
+    );
     const bwDiv = document.getElementById("bookwork");
-    const entries = Object.entries(bookworkMap);
+    const entries = Object.entries(currentBookworkMemory);
     if (entries.length === 0) {
         bwDiv.innerHTML = "No bookwork detected yet.";
         return;
     }
 
-    bwDiv.innerHTML = entries.map(([code, answer]) => `
-        <div class="bw-item" style="display: flex; justify-content: space-between; align-items: center; margin: 6px 0; padding: 6px 8px; background: #f3f4f6; border-radius: 8px;">
-            <div style="flex-grow: 1; word-break: break-word; margin-right: 8px;">
-                <strong>Code ${code}</strong>: <span class="bw-answer">${answer}</span>
-            </div>
-            <button class="clear-single-bw" data-code="${code}" style="width: auto; padding: 3px 8px; font-size: 11px; background: #9ca3af; border-radius: 6px; flex-shrink: 0;">Delete</button>
-        </div>
-    `).join("");
+    bwDiv.innerHTML = entries.map(([code, entry]) => {
+        const isOpen = code === openBookworkCode;
+        const steps = entry.working.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        const savedLabel = entry.savedAt ? new Date(entry.savedAt).toLocaleString() : "Time not recorded";
+        return `
+            <article class="bw-item ${isOpen ? "is-open" : ""}" data-code="${escapeHtml(code)}">
+                <div class="bw-heading">
+                    <strong>Code ${escapeHtml(code)}</strong>
+                    <button class="clear-single-bw danger-button" data-code="${escapeHtml(code)}">Delete</button>
+                </div>
+                <div class="bw-answer">${mathMarkup(entry.answer)}</div>
+                <small>Saved ${escapeHtml(savedLabel)}</small>
+                ${isOpen ? `
+                    <div class="bw-working">
+                        <strong>Working</strong>
+                        ${steps.length ? steps.map(step => `<div class="working-step">${mathMarkup(step)}</div>`).join("") : "<div class=\"working-step\">Working was not captured for this older entry.</div>"}
+                    </div>
+                    <textarea class="bw-info" data-code="${escapeHtml(code)}" placeholder="Add a note or extra information...">${escapeHtml(entry.info)}</textarea>
+                    <div class="bw-controls">
+                        <button class="save-info" data-code="${escapeHtml(code)}">Save info</button>
+                        <button class="close-info secondary-button" data-code="${escapeHtml(code)}">Close</button>
+                    </div>
+                ` : "<small>Click to view working and add notes</small>"}
+            </article>
+        `;
+    }).join("");
 
-    // Render KaTeX for all math formulas in answers
-    if (window.renderMathInElement) {
-        try {
-            window.renderMathInElement(bwDiv, {
-                delimiters: [
-                    {left: '$$', right: '$$', display: true},
-                    {left: '$', right: '$', display: false},
-                    {left: '\\(', right: '\\)', display: false},
-                    {left: '\\[', right: '\\]', display: true}
-                ],
-                throwOnError: false
-            });
-        } catch (e) {
-            console.error("KaTeX rendering error:", e);
-        }
-    }
+    renderKatex(bwDiv);
 
-    // Attach single item clear listeners
-    document.querySelectorAll(".clear-single-bw").forEach(btn => {
-        btn.onclick = async (e) => {
-            const code = e.currentTarget.getAttribute("data-code");
+    bwDiv.querySelectorAll(".bw-item").forEach(item => {
+        item.onclick = event => {
+            if (event.target.closest("button, textarea")) return;
+            openBookworkCode = item.dataset.code;
+            renderBookworkUI(currentBookworkMemory);
+        };
+    });
+    bwDiv.querySelectorAll(".clear-single-bw").forEach(btn => {
+        btn.onclick = async event => {
+            event.stopPropagation();
+            const code = event.currentTarget.dataset.code;
             delete currentBookworkMemory[code];
-            
-            // Record deletion in local storage
-            const stored = await chrome.storage.local.get(["bookworkMemory", "deletedBookworks"]);
+            const stored = await chrome.storage.local.get(["deletedBookworks"]);
             const deletedSet = stored.deletedBookworks || {};
             deletedSet[code] = true;
-
-            await chrome.storage.local.set({ 
-                bookworkMemory: currentBookworkMemory,
-                deletedBookworks: deletedSet
-            });
-            
-            // Sync server
-            try {
-                await fetch(`http://localhost:3000/bookwork/${encodeURIComponent(code)}`, { method: "DELETE" });
-            } catch (err) {}
+            await chrome.storage.local.set({ bookworkMemory: currentBookworkMemory, deletedBookworks: deletedSet });
+            try { await fetch(`http://localhost:3000/bookwork/${encodeURIComponent(code)}`, { method: "DELETE" }); } catch (e) {}
+            openBookworkCode = null;
+            renderBookworkUI(currentBookworkMemory);
+        };
+    });
+    bwDiv.querySelectorAll(".save-info").forEach(btn => {
+        btn.onclick = async event => {
+            event.stopPropagation();
+            const code = event.currentTarget.dataset.code;
+            currentBookworkMemory[code].info = bwDiv.querySelector(`.bw-info[data-code="${CSS.escape(code)}"]`).value;
+            await chrome.storage.local.set({ bookworkMemory: currentBookworkMemory });
+            await syncBookworks();
+            renderBookworkUI(currentBookworkMemory);
+        };
+    });
+    bwDiv.querySelectorAll(".close-info").forEach(btn => {
+        btn.onclick = event => {
+            event.stopPropagation();
+            openBookworkCode = null;
             renderBookworkUI(currentBookworkMemory);
         };
     });
 }
 
-// Clear All handler
-document.getElementById("clearAllBw").onclick = async () => {
-    currentBookworkMemory = {};
-    const stored = await chrome.storage.local.get(["bookworkMemory"]);
-    const allCodes = Object.keys(stored.bookworkMemory || {});
-    const deletedSet = {};
-    allCodes.forEach(c => deletedSet[c] = true);
+async function openServerExport(format) {
+    await syncBookworks();
+    await chrome.tabs.create({
+        url: `http://localhost:3000/bookwork/export/${format}`
+    });
+}
 
-    await chrome.storage.local.set({ bookworkMemory: {}, deletedBookworks: deletedSet });
+document.getElementById("exportMarkdown").onclick = async () => {
     try {
-        await fetch("http://localhost:3000/bookwork", { method: "DELETE" });
-    } catch (e) {}
+        await openServerExport("markdown");
+    } catch (error) {
+        console.error("Markdown export failed:", error);
+        alert("Could not open the Markdown export. Make sure the local server is running.");
+    }
+};
+
+document.getElementById("exportHtml").onclick = async () => {
+    try {
+        await openServerExport("html");
+    } catch (error) {
+        console.error("HTML export failed:", error);
+        alert("Could not open the HTML export. Make sure the local server is running.");
+    }
+};
+
+document.getElementById("clearAllBw").onclick = async () => {
+    const allCodes = Object.keys(currentBookworkMemory);
+    const deletedSet = Object.fromEntries(allCodes.map(code => [code, true]));
+    currentBookworkMemory = {};
+    await chrome.storage.local.set({ bookworkMemory: {}, deletedBookworks: deletedSet });
+    try { await fetch("http://localhost:3000/bookwork", { method: "DELETE" }); } catch (e) {}
     renderBookworkUI({});
 };
 
-// Poll server for Bookwork updates
 setInterval(async () => {
     try {
         const res = await fetch("http://localhost:3000/bookwork");
         const data = await res.json();
-        
-        if (data.bookworks) {
-            chrome.storage.local.get(["bookworkMemory", "deletedBookworks"], (storedData) => {
-                const existing = storedData.bookworkMemory || {};
-                const deletedSet = storedData.deletedBookworks || {};
-                let updated = false;
-                
-                // Only ADD new items if they haven't been deleted by user
-                data.bookworks.forEach(b => {
-                    if (!existing.hasOwnProperty(b.code) && !deletedSet[b.code]) {
-                        existing[b.code] = b.answer;
-                        updated = true;
-                    }
-                });
-
-                if (updated) {
-                    chrome.storage.local.set({ bookworkMemory: existing });
-                    renderBookworkUI(existing);
+        if (!data.bookworks) return;
+        chrome.storage.local.get(["bookworkMemory", "deletedBookworks"], storedData => {
+            const existing = Object.fromEntries(Object.entries(storedData.bookworkMemory || {}).map(([code, value]) => [code, normaliseBookwork(value, code)]));
+            const deletedSet = storedData.deletedBookworks || {};
+            let updated = false;
+            data.bookworks.forEach(serverEntry => {
+                if (deletedSet[serverEntry.code]) return;
+                const next = normaliseBookwork(serverEntry, serverEntry.code);
+                if (JSON.stringify(existing[serverEntry.code]) !== JSON.stringify(next)) {
+                    existing[serverEntry.code] = next;
+                    updated = true;
                 }
             });
-        }
-    } catch (e) {
-        // Server might be off or starting up
-    }
-}, 2000);
-
-// Load persisted bookwork memory on popup load and sync server to match local storage
-chrome.storage.local.get(["bookworkMemory"], async (data) => {
-    const memory = data.bookworkMemory || {};
-    renderBookworkUI(memory);
-    
-    // Sync server with local storage state on load
-    const bwArray = Object.entries(memory).map(([c, a]) => ({ code: c, answer: a }));
-    try {
-        await fetch("http://localhost:3000/bookwork", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ bookworks: bwArray })
+            if (updated) {
+                chrome.storage.local.set({ bookworkMemory: existing });
+                renderBookworkUI(existing);
+            }
         });
     } catch (e) {}
+}, 2000);
+
+chrome.storage.local.get(["bookworkMemory"], async data => {
+    const memory = data.bookworkMemory || {};
+    renderBookworkUI(memory);
+    await syncBookworks();
 });
 
 

@@ -31,3 +31,5 @@ node_modules/
 /mobile_app/build/
 /mobile_app/.pub/
 /mobile_app/.pub-cache/
+
+/Downloads/

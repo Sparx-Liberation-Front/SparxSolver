@@ -70,6 +70,91 @@ body {
     margin-top:0;
 }
 
+.bookwork-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.bookwork-actions button {
+    width: auto;
+    padding: 5px 9px;
+    font-size: 11px;
+}
+
+.secondary-button {
+    background: #334155;
+}
+
+.danger-button {
+    background: #ef4444;
+}
+
+.bw-item {
+    margin: 8px 0;
+    padding: 10px 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.bw-item:hover, .bw-item.is-open {
+    border-color: #818cf8;
+    background: #eef2ff;
+}
+
+.bw-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.bw-answer {
+    display: block;
+    margin-top: 5px;
+    color: #111827;
+    overflow-wrap: anywhere;
+}
+
+.bw-working {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-left: 3px solid #6366f1;
+    background: white;
+}
+
+.working-step {
+    padding: 4px 0;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.working-step:last-child {
+    border-bottom: 0;
+}
+
+.bw-info {
+    width: 100%;
+    min-height: 58px;
+    margin: 8px 0;
+    padding: 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    resize: vertical;
+    font: inherit;
+}
+
+.bw-controls {
+    display: flex;
+    gap: 6px;
+}
+
+.bw-controls button {
+    width: auto;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
 
 input {
     width:100%;

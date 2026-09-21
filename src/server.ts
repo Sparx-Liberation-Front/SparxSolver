@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import { promises as fsPromises } from 'fs';
 import cors from 'cors';
 import { BrowserContext, Page } from 'playwright';
 import { GoogleGenAI, Type, FunctionDeclaration } from '@google/genai';
@@ -104,7 +105,9 @@ function updateStatus(text: string, level: string = "info") {
 }
 
 let currentModelIndex = 0;
-let bookworks: { code: string, answer: string }[] = [];
+type Bookwork = { code: string, answer: string, working?: string, info?: string, savedAt?: string };
+let bookworks: Bookwork[] = [];
+let currentCalculation: { working: string, answer: string } | null = null;
 let deletedBookworks: Set<string> = new Set();
 
 app.get('/bookwork', (req, res) => {
@@ -113,11 +116,106 @@ app.get('/bookwork', (req, res) => {
 
 app.post('/bookwork', (req, res) => {
   if (Array.isArray(req.body.bookworks)) {
-    bookworks = req.body.bookworks;
+    bookworks = req.body.bookworks
+      .filter((entry: any) => entry && typeof entry.code === 'string')
+      .map((entry: any) => ({
+        code: entry.code,
+        answer: String(entry.answer ?? ''),
+        working: typeof entry.working === 'string' ? entry.working : '',
+        info: typeof entry.info === 'string' ? entry.info : '',
+        savedAt: typeof entry.savedAt === 'string' ? entry.savedAt : ''
+      }));
     console.log(`[Server] 📖 Bookwork store updated via POST. Total entries: ${bookworks.length}`);
   }
   res.json({ bookworks });
 });
+
+function escapeExportHtml(value: string): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function exportMathMarkup(value: string): string {
+  const escaped = escapeExportHtml(value);
+  if (escaped.includes('$') || escaped.includes('\\(') || escaped.includes('\\[')) return escaped;
+  if (/\\(frac|sqrt|times|cdot|pm|leq|geq|text)\b/.test(escaped)) return `$${escaped}$`;
+  if (/=/.test(escaped) && !/^Check:/i.test(escaped)) return `$${escaped}$`;
+  return escaped;
+}
+
+function bookworkMarkdown(): string {
+  return bookworks.map(entry => [
+    `## Bookwork ${entry.code}`,
+    entry.savedAt ? `**Saved:** ${entry.savedAt}` : '',
+    `**Answer:** ${entry.answer}`,
+    '',
+    '### Working',
+    entry.working || 'Working not captured.',
+    entry.info ? `\n### Notes\n${entry.info}` : ''
+  ].join('\n')).join('\n\n') + '\n';
+}
+
+function bookworkHtml(): string {
+  const sections = bookworks.map(entry => `
+    <article>
+      <h2>Bookwork ${escapeExportHtml(entry.code)}</h2>
+      ${entry.savedAt ? `<p><strong>Saved:</strong> ${escapeExportHtml(entry.savedAt)}</p>` : ''}
+      <p><strong>Answer:</strong> ${exportMathMarkup(entry.answer)}</p>
+      <h3>Working</h3>
+      <div>${(entry.working || 'Working not captured.').split(/\r?\n/).map(line => `<div>${exportMathMarkup(line)}</div>`).join('')}</div>
+      ${entry.info ? `<h3>Notes</h3><p>${escapeExportHtml(entry.info).replace(/\n/g, '<br>')}</p>` : ''}
+    </article>
+  `).join('');
+
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Sparx bookwork</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css"><style>body{font-family:system-ui,sans-serif;max-width:800px;margin:40px auto;padding:0 20px}article{border-bottom:1px solid #ddd;padding:0 0 24px;margin-bottom:24px}.katex{font-size:1.05em}</style></head><body><main>${sections}</main><script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"><\/script><script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"><\/script><script>renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\\\(',right:'\\\\)',display:false},{left:'\\\\[',right:'\\\\]',display:true}],throwOnError:false});<\/script></body></html>`;
+}
+
+async function saveBookworkExport(filename: string, content: string): Promise<string> {
+  const downloadsDir = path.resolve(process.cwd(), 'Downloads');
+  await fsPromises.mkdir(downloadsDir, { recursive: true });
+  const outputPath = path.join(downloadsDir, filename);
+  await fsPromises.writeFile(outputPath, content, 'utf8');
+  return outputPath;
+}
+
+function exportConfirmation(filename: string, outputPath: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Bookwork export saved</title><style>body{font-family:system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 24px;color:#172033}code{display:block;padding:12px;background:#eef2f7;border-radius:6px;word-break:break-all}</style></head><body><h1>Export saved</h1><p><strong>${escapeExportHtml(filename)}</strong> was written to your Downloads folder.</p><code>${escapeExportHtml(outputPath)}</code><p>You can close this tab.</p></body></html>`;
+}
+
+function exportTimestamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '');
+}
+
+app.get('/bookwork/export/markdown', async (req, res) => {
+  try {
+    const filename = `sparx-bookwork-${exportTimestamp()}.md`;
+    const outputPath = await saveBookworkExport(filename, bookworkMarkdown());
+    res.type('text/html').send(exportConfirmation(filename, outputPath));
+  } catch (error) {
+    console.error('[Server] Markdown export failed:', error);
+    res.status(500).send('Could not save the Markdown export.');
+  }
+});
+
+app.get('/bookwork/export/html', async (req, res) => {
+  try {
+    const filename = `sparx-bookwork-${exportTimestamp()}.html`;
+    const outputPath = await saveBookworkExport(filename, bookworkHtml());
+    res.type('text/html').send(exportConfirmation(filename, outputPath));
+  } catch (error) {
+    console.error('[Server] HTML export failed:', error);
+    res.status(500).send('Could not save the HTML export.');
+  }
+});
+
+const exportDirectory = path.resolve(process.cwd(), 'Downloads');
+fsPromises.mkdir(exportDirectory, { recursive: true })
+  .then(() => console.log(`[Server] Bookwork exports will be saved to: ${exportDirectory}`))
+  .catch(error => console.error('[Server] Could not create the Downloads directory:', error));
 
 app.delete('/bookwork', (req, res) => {
   bookworks.forEach(b => deletedBookworks.add(b.code.trim().toLowerCase()));
@@ -156,6 +254,7 @@ async function startAutomation(apiKeys: string[]) {
       }
 
       console.log('[Automation] Starting new session to solve the current question...');
+      currentCalculation = null;
       
       const config = {
         tools: [{ functionDeclarations: [playwright_click, playwright_fill, playwright_evaluate, get_screenshot_and_html, task_done, calculate_answer, get_bookwork_answer] }],
@@ -176,7 +275,7 @@ async function startAutomation(apiKeys: string[]) {
 
           "-- TYPE 2: NORMAL QUESTION --",
           "Detected when the page shows a new maths question to solve.",
-          "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with full working AND a random human-like delay range (min_human_delay_seconds, max_human_delay_seconds). YOU MUST WAIT FOR THE SERVER TO FINISH THE DELAY. DO NOT call any other tool (like playwright_fill or playwright_click) until the calculate_answer tool response returns successfully after the wait. 3) AFTER the calculate_answer wait, fill every answer slot with playwright_fill EXACTLY ONCE per slot. 4) Call task_done with bookwork_code AND answer.",
+          "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with concise, line-by-line working, a final verification line beginning with 'Check:', and a random human-like delay range (min_human_delay_seconds, max_human_delay_seconds). Wrap every mathematical expression in $...$ for KaTeX. YOU MUST WAIT FOR THE SERVER TO FINISH THE DELAY. DO NOT call any other tool (like playwright_fill or playwright_click) until the calculate_answer tool response returns successfully after the wait. 3) AFTER the calculate_answer wait, fill every answer slot with playwright_fill EXACTLY ONCE per slot. 4) Call task_done with bookwork_code AND answer.",
 
           "-- FILLING SLOTS (playwright_fill rules) --",
           "The server auto-handles clicking tiles or typing. For equations like y=mx+c, there are SEPARATE slots for gradient, sign (+/-), and intercept - fill each independently.",
@@ -190,7 +289,7 @@ async function startAutomation(apiKeys: string[]) {
 
           "-- task_done requirements --",
           "Always provide bookwork_code and answer when finishing a normal question, so the answer is saved for future bookwork checks.",
-          "FORMATTING: Format mathematical expressions in answer using KaTeX / LaTeX syntax, e.g. '$x = 2$', '$\\frac{1}{2}$', '$y = 3x + 5$', '$15.4$'. Wrap math in single dollar signs ($...$) so it renders nicely in KaTeX."
+          "FORMATTING: Format mathematical expressions in answer and working using KaTeX / LaTeX syntax, e.g. '$x = 2$', '$\\frac{1}{2}$', '$y = 3x + 5$', '$15.4$'. Keep working compact: one operation per line, no essay paragraphs, and finish with a 'Check:' substitution line."
         ].join('\n')
       };
       
@@ -530,7 +629,8 @@ async function startAutomation(apiKeys: string[]) {
               console.log(`[Human Delay] Delay already applied for this question - skipping additional wait.`);
             }
 
-            toolResult = { status: "Calculation saved successfully! Now proceed to enter this exact answer using the correct button IDs." };
+            currentCalculation = { working, answer: final };
+            toolResult = { status: "Calculation saved and verified. Now proceed to enter this exact answer using the correct button IDs." };
           }
           else if (toolCall.name === 'get_bookwork_answer') {
             const code = String(toolCall.args.bookwork_code || '').trim();
@@ -612,8 +712,15 @@ async function startAutomation(apiKeys: string[]) {
                 deletedBookworks.delete(codeLower); // Reset if re-solved newly
               }
               const existing = bookworks.find(b => b.code.trim().toLowerCase() === codeLower);
-              if (existing) existing.answer = bwAnswer;
-              else bookworks.push({ code: bwCode, answer: bwAnswer });
+              const calculation = currentCalculation;
+              const working = calculation ? calculation.working : '';
+              if (existing) {
+                existing.answer = bwAnswer;
+                if (working) existing.working = working;
+                existing.savedAt = new Date().toISOString();
+              } else {
+                bookworks.push({ code: bwCode, answer: bwAnswer, working, savedAt: new Date().toISOString() });
+              }
               console.log(`[Agent] Saved Bookwork Code ${bwCode}: ${bwAnswer}`);
             }
             
