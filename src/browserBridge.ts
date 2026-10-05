@@ -10,8 +10,41 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
     let currentApiKeys: string[] = [];
     let currentKeyIndex = 0;
     let currentModelIndex = 0;
-    let bookworks: { code: string; answer: string }[] = [];
+    type MobileBookwork = { code: string; answer: string; working: string; info: string; savedAt: string };
+    let bookworks: MobileBookwork[] = [];
     let previousMemory = "";
+    let currentCalculation: { working: string; answer: string } | null = null;
+    let agentSettings = {
+        minDelaySeconds: 2,
+        maxDelaySeconds: 20,
+        requestTimeoutSeconds: 45,
+        retryDelaySeconds: 2,
+        maxRequestAttempts: 3
+    };
+
+    function notifyBookworks() {
+        notifyFlutter('bookwork_sync', { bookworks });
+    }
+
+    function waitForHumanDelay() {
+        const min = Math.max(0, Math.min(agentSettings.minDelaySeconds, agentSettings.maxDelaySeconds));
+        const max = Math.max(min, agentSettings.maxDelaySeconds);
+        const seconds = Math.floor(Math.random() * (max - min + 1)) + min;
+        notifyFlutter('status', { text: `Thinking time: ${seconds}s`, level: 'info' });
+        return new Promise<void>(resolve => {
+            let remaining = seconds;
+            const tick = () => {
+                if (!automationRunning || remaining <= 0) {
+                    resolve();
+                    return;
+                }
+                notifyFlutter('status', { text: `Thinking time: ${remaining}s`, level: 'info' });
+                remaining -= 1;
+                setTimeout(tick, 1000);
+            };
+            tick();
+        });
+    }
 
     function notifyFlutter(type: string, payload: any) {
         if ((window as any).flutter_inappwebview && (window as any).flutter_inappwebview.callHandler) {
@@ -309,17 +342,25 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
 
     async function callGeminiAPI(apiKey: string, modelName: string, contents: any[]) {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), agentSettings.requestTimeoutSeconds * 1000);
         const requestBody = {
             contents: contents,
             tools: [{ functionDeclarations: toolDeclarations }],
             systemInstruction: { parts: [{ text: systemInstruction }] }
         };
 
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
+        let res: Response;
+        try {
+            res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody),
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeout);
+        }
 
         if (!res.ok) {
             const errText = await res.text();
@@ -336,6 +377,7 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
 
         let currentPrompt: any[] = [{ text: promptText }];
         let isDone = false;
+        currentCalculation = null;
 
         while (automationRunning && !isDone) {
             contents.push({ role: 'user', parts: currentPrompt });
@@ -343,21 +385,24 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
             let response: any = null;
             let success = false;
 
+            let requestAttempts = 0;
             while (automationRunning && !success) {
                 const apiKey = currentApiKeys[currentKeyIndex];
                 const model = fallbackModels[currentModelIndex];
 
                 try {
+                    requestAttempts += 1;
                     notifyFlutter('log', { text: `Querying ${model} (Key ${currentKeyIndex + 1}/${currentApiKeys.length})...`, level: 'info' });
                     response = await callGeminiAPI(apiKey, model, contents);
                     success = true;
                 } catch (err: any) {
                     notifyFlutter('log', { text: `Key/Model Error (${err.message}). Cycling key/model...`, level: 'warn' });
-                    currentKeyIndex = (currentKeyIndex + 1) % currentApiKeys.length;
-                    if (currentKeyIndex === 0) {
-                        currentModelIndex = (currentModelIndex + 1) % fallbackModels.length;
+                    if (requestAttempts >= agentSettings.maxRequestAttempts) {
+                        requestAttempts = 0;
+                        currentKeyIndex = (currentKeyIndex + 1) % currentApiKeys.length;
+                        if (currentKeyIndex === 0) currentModelIndex = (currentModelIndex + 1) % fallbackModels.length;
                     }
-                    await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, agentSettings.retryDelaySeconds * 1000));
                 }
             }
 
@@ -386,19 +431,6 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
                 resultData = executeClick(call.args.selector);
             } else if (call.name === 'playwright_fill') {
                 resultData = await executeFill(call.args.selector, call.args.value);
-            } else if (call.name === 'batch_interactions') {
-                const actions = Array.isArray(call.args?.actions) ? call.args.actions.slice(0, 30) : [];
-                const results: any[] = [];
-                for (const [index, action] of actions.entries()) {
-                    if (action?.action === 'click') {
-                        results.push({ index, ...executeClick(action.selector) });
-                    } else if (action?.action === 'fill') {
-                        results.push({ index, ...await executeFill(action.selector, action.value) });
-                    } else {
-                        results.push({ index, error: 'Invalid batch action.' });
-                    }
-                }
-                resultData = { results, completed: results.every(result => !result.error) };
             } else if (call.name === 'playwright_evaluate') {
                 try {
                     const evalRes = eval(call.args.script);
@@ -407,6 +439,11 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
                     resultData = { error: e.message };
                 }
             } else if (call.name === 'calculate_answer') {
+                currentCalculation = {
+                    working: String(call.args.step_by_step_working || ''),
+                    answer: String(call.args.final_answer || '')
+                };
+                await waitForHumanDelay();
                 resultData = { status: `Working saved: ${call.args.final_answer}` };
             } else if (call.name === 'get_bookwork_answer') {
                 const code = String(call.args.bookwork_code || '').trim().toLowerCase();
@@ -418,8 +455,19 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
                 }
             } else if (call.name === 'task_done') {
                 if (call.args.bookwork_code && call.args.answer) {
-                    bookworks.push({ code: call.args.bookwork_code, answer: call.args.answer });
-                    notifyFlutter('bookwork_add', { code: call.args.bookwork_code, answer: call.args.answer });
+                    const code = String(call.args.bookwork_code).trim();
+                    const entry: MobileBookwork = {
+                        code,
+                        answer: String(call.args.answer),
+                        working: currentCalculation?.working || '',
+                        info: '',
+                        savedAt: new Date().toISOString()
+                    };
+                    const existingIndex = bookworks.findIndex(item => item.code.toLowerCase() === code.toLowerCase());
+                    if (existingIndex >= 0) bookworks[existingIndex] = { ...bookworks[existingIndex], ...entry };
+                    else bookworks.push(entry);
+                    notifyFlutter('bookwork_add', entry);
+                    notifyBookworks();
                 }
                 previousMemory = call.args.memory_for_next_part || "";
                 isDone = true;
@@ -439,10 +487,13 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
     }
 
     (window as any).SparxEngine = {
-        startAutomation: async function(apiKeys: string[]) {
+        startAutomation: async function(apiKeys: string[], settings?: Partial<typeof agentSettings>) {
             if (automationRunning) return;
             automationRunning = true;
             currentApiKeys = apiKeys;
+            agentSettings = { ...agentSettings, ...(settings || {}) };
+            currentKeyIndex = 0;
+            currentModelIndex = 0;
             notifyFlutter('log', { text: 'Starting Sparx AI Agent loop...', level: 'success' });
 
             while (automationRunning) {
@@ -454,6 +505,40 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
         stopAutomation: function() {
             automationRunning = false;
             notifyFlutter('log', { text: 'Automation stopped.', level: 'warn' });
+        },
+
+        getBookworks: function() {
+            notifyBookworks();
+            return bookworks;
+        },
+
+        setBookworks: function(entries: MobileBookwork[]) {
+            if (Array.isArray(entries)) {
+                bookworks = entries.map(entry => ({
+                    code: String(entry.code || '').trim(),
+                    answer: String(entry.answer || ''),
+                    working: String(entry.working || ''),
+                    info: String(entry.info || ''),
+                    savedAt: String(entry.savedAt || '')
+                })).filter(entry => entry.code.length > 0);
+            }
+            notifyBookworks();
+        },
+
+        deleteBookwork: function(code: string) {
+            bookworks = bookworks.filter(item => item.code.toLowerCase() !== String(code).trim().toLowerCase());
+            notifyBookworks();
+        },
+
+        clearBookworks: function() {
+            bookworks = [];
+            notifyBookworks();
+        },
+
+        updateBookworkInfo: function(code: string, info: string) {
+            const entry = bookworks.find(item => item.code.toLowerCase() === String(code).trim().toLowerCase());
+            if (entry) entry.info = String(info || '');
+            notifyBookworks();
         }
     };
 })();

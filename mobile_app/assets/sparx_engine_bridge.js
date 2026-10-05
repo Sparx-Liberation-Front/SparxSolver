@@ -45,29 +45,6 @@
           }
         },
         {
-          name: "batch_interactions",
-          description: "Execute several page interactions in order after you have inspected the current screen. Use this once for all answer boxes and required clicks instead of calling playwright_fill or playwright_click repeatedly. Each action must use a fresh selector from the latest screenshot or click result.",
-          parameters: {
-            type: "OBJECT",
-            properties: {
-              actions: {
-                type: "ARRAY",
-                description: 'Ordered actions. Use {"action":"fill","selector":"[data-ai-id="15"]","value":"5"} for answer boxes or {"action":"click","selector":"[data-ai-id="16"]"} for buttons.',
-                items: {
-                  type: "OBJECT",
-                  properties: {
-                    action: { type: "STRING", enum: ["click", "fill"] },
-                    selector: { type: "STRING" },
-                    value: { type: "STRING" }
-                  },
-                  required: ["action", "selector"]
-                }
-              }
-            },
-            required: ["actions"]
-          }
-        },
-        {
           name: "calculate_answer",
           description: "Use this tool to write out your step-by-step mathematical working, determine the final answer, and estimate a realistic time range in seconds (min and max) that an average human student would take to solve this specific question BEFORE you fill any slots.",
           parameters: {
@@ -132,8 +109,7 @@
         "-- TYPE 2: NORMAL QUESTION --",
         "Detected when the page shows a new maths question to solve.",
         "GRAPH QUESTIONS: If a graph, chart, coordinate grid, canvas, SVG, or plotted image is visible, inspect the graph crop carefully. Read the axis labels, scale, origin, grid spacing, plotted points, intercepts, and line direction explicitly before calculating. Do not estimate from visual size alone; cross-check coordinates against tick spacing and state the coordinates in your working. If a label or point is unreadable, do not guess: inspect the DOM text or request another screenshot first.",
-        "BATCH ACTIONS: After calculating an answer, call batch_interactions once with all answer-box fills and required clicks in their exact order. This saves requests and avoids repeating the same tool call. Do not batch actions until the latest screenshot has provided valid selectors. On bookwork checks, use one batch for the matching option and Continue/Submit click if both are visible.",
-        "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with full working AND realistic min/max estimated human solving time in seconds (e.g. min: 12, max: 25). 3) Call batch_interactions once with every answer-box fill and required click in order. 4) Call task_done with bookwork_code AND answer.",
+        "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with full working AND realistic min/max estimated human solving time in seconds (e.g. min: 12, max: 25). 3) Use playwright_fill and playwright_click to enter the answer and submit it. 4) Call task_done with bookwork_code AND answer.",
         "-- FILLING SLOTS (playwright_fill rules) --",
         "The engine auto-handles clicking tiles or typing. For equations like y=mx+c, there are SEPARATE slots for gradient, sign (+/-), and intercept - fill each independently.",
         "If isTextInput:true appears in interactiveElements, it is a plain text box - call playwright_fill with the value.",
@@ -174,6 +150,36 @@
         let currentModelIndex = 0;
         let bookworks = [];
         let previousMemory = "";
+        let currentCalculation = null;
+        let agentSettings = {
+          minDelaySeconds: 2,
+          maxDelaySeconds: 20,
+          requestTimeoutSeconds: 45,
+          retryDelaySeconds: 2,
+          maxRequestAttempts: 3
+        };
+        function notifyBookworks() {
+          notifyFlutter("bookwork_sync", { bookworks });
+        }
+        function waitForHumanDelay() {
+          const min = Math.max(0, Math.min(agentSettings.minDelaySeconds, agentSettings.maxDelaySeconds));
+          const max = Math.max(min, agentSettings.maxDelaySeconds);
+          const seconds = Math.floor(Math.random() * (max - min + 1)) + min;
+          notifyFlutter("status", { text: `Thinking time: ${seconds}s`, level: "info" });
+          return new Promise((resolve) => {
+            let remaining = seconds;
+            const tick = () => {
+              if (!automationRunning || remaining <= 0) {
+                resolve();
+                return;
+              }
+              notifyFlutter("status", { text: `Thinking time: ${remaining}s`, level: "info" });
+              remaining -= 1;
+              setTimeout(tick, 1e3);
+            };
+            tick();
+          });
+        }
         function notifyFlutter(type, payload) {
           if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
             window.flutter_inappwebview.callHandler("SparxBridge", { type, payload });
@@ -404,16 +410,24 @@
         }
         async function callGeminiAPI(apiKey, modelName, contents2) {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), agentSettings.requestTimeoutSeconds * 1e3);
           const requestBody = {
             contents: contents2,
             tools: [{ functionDeclarations: toolDeclarations }],
             systemInstruction: { parts: [{ text: systemInstruction }] }
           };
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(requestBody)
-          });
+          let res;
+          try {
+            res = await fetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(requestBody),
+              signal: controller.signal
+            });
+          } finally {
+            clearTimeout(timeout);
+          }
           if (!res.ok) {
             const errText = await res.text();
             throw new Error(`API ${res.status}: ${errText}`);
@@ -428,24 +442,28 @@
 MEMORY: ${previousMemory}`;
           let currentPrompt = [{ text: promptText }];
           let isDone = false;
+          currentCalculation = null;
           while (automationRunning && !isDone) {
             contents.push({ role: "user", parts: currentPrompt });
             let response = null;
             let success = false;
+            let requestAttempts = 0;
             while (automationRunning && !success) {
               const apiKey = currentApiKeys[currentKeyIndex];
               const model = fallbackModels[currentModelIndex];
               try {
+                requestAttempts += 1;
                 notifyFlutter("log", { text: `Querying ${model} (Key ${currentKeyIndex + 1}/${currentApiKeys.length})...`, level: "info" });
                 response = await callGeminiAPI(apiKey, model, contents);
                 success = true;
               } catch (err) {
                 notifyFlutter("log", { text: `Key/Model Error (${err.message}). Cycling key/model...`, level: "warn" });
-                currentKeyIndex = (currentKeyIndex + 1) % currentApiKeys.length;
-                if (currentKeyIndex === 0) {
-                  currentModelIndex = (currentModelIndex + 1) % fallbackModels.length;
+                if (requestAttempts >= agentSettings.maxRequestAttempts) {
+                  requestAttempts = 0;
+                  currentKeyIndex = (currentKeyIndex + 1) % currentApiKeys.length;
+                  if (currentKeyIndex === 0) currentModelIndex = (currentModelIndex + 1) % fallbackModels.length;
                 }
-                await new Promise((r) => setTimeout(r, 1e3));
+                await new Promise((r) => setTimeout(r, agentSettings.retryDelaySeconds * 1e3));
               }
             }
             if (!automationRunning) break;
@@ -467,19 +485,6 @@ MEMORY: ${previousMemory}`;
               resultData = executeClick(call.args.selector);
             } else if (call.name === "playwright_fill") {
               resultData = await executeFill(call.args.selector, call.args.value);
-            } else if (call.name === "batch_interactions") {
-              const actions = Array.isArray(call.args?.actions) ? call.args.actions.slice(0, 30) : [];
-              const results = [];
-              for (const [index, action] of actions.entries()) {
-                if (action?.action === "click") {
-                  results.push({ index, ...executeClick(action.selector) });
-                } else if (action?.action === "fill") {
-                  results.push({ index, ...await executeFill(action.selector, action.value) });
-                } else {
-                  results.push({ index, error: "Invalid batch action." });
-                }
-              }
-              resultData = { results, completed: results.every((result) => !result.error) };
             } else if (call.name === "playwright_evaluate") {
               try {
                 const evalRes = eval(call.args.script);
@@ -488,6 +493,11 @@ MEMORY: ${previousMemory}`;
                 resultData = { error: e.message };
               }
             } else if (call.name === "calculate_answer") {
+              currentCalculation = {
+                working: String(call.args.step_by_step_working || ""),
+                answer: String(call.args.final_answer || "")
+              };
+              await waitForHumanDelay();
               resultData = { status: `Working saved: ${call.args.final_answer}` };
             } else if (call.name === "get_bookwork_answer") {
               const code = String(call.args.bookwork_code || "").trim().toLowerCase();
@@ -499,8 +509,19 @@ MEMORY: ${previousMemory}`;
               }
             } else if (call.name === "task_done") {
               if (call.args.bookwork_code && call.args.answer) {
-                bookworks.push({ code: call.args.bookwork_code, answer: call.args.answer });
-                notifyFlutter("bookwork_add", { code: call.args.bookwork_code, answer: call.args.answer });
+                const code = String(call.args.bookwork_code).trim();
+                const entry = {
+                  code,
+                  answer: String(call.args.answer),
+                  working: currentCalculation?.working || "",
+                  info: "",
+                  savedAt: (/* @__PURE__ */ new Date()).toISOString()
+                };
+                const existingIndex = bookworks.findIndex((item) => item.code.toLowerCase() === code.toLowerCase());
+                if (existingIndex >= 0) bookworks[existingIndex] = { ...bookworks[existingIndex], ...entry };
+                else bookworks.push(entry);
+                notifyFlutter("bookwork_add", entry);
+                notifyBookworks();
               }
               previousMemory = call.args.memory_for_next_part || "";
               isDone = true;
@@ -517,10 +538,13 @@ MEMORY: ${previousMemory}`;
           }
         }
         window.SparxEngine = {
-          startAutomation: async function(apiKeys) {
+          startAutomation: async function(apiKeys, settings) {
             if (automationRunning) return;
             automationRunning = true;
             currentApiKeys = apiKeys;
+            agentSettings = { ...agentSettings, ...settings || {} };
+            currentKeyIndex = 0;
+            currentModelIndex = 0;
             notifyFlutter("log", { text: "Starting Sparx AI Agent loop...", level: "success" });
             while (automationRunning) {
               await runAgentLoop();
@@ -530,6 +554,35 @@ MEMORY: ${previousMemory}`;
           stopAutomation: function() {
             automationRunning = false;
             notifyFlutter("log", { text: "Automation stopped.", level: "warn" });
+          },
+          getBookworks: function() {
+            notifyBookworks();
+            return bookworks;
+          },
+          setBookworks: function(entries) {
+            if (Array.isArray(entries)) {
+              bookworks = entries.map((entry) => ({
+                code: String(entry.code || "").trim(),
+                answer: String(entry.answer || ""),
+                working: String(entry.working || ""),
+                info: String(entry.info || ""),
+                savedAt: String(entry.savedAt || "")
+              })).filter((entry) => entry.code.length > 0);
+            }
+            notifyBookworks();
+          },
+          deleteBookwork: function(code) {
+            bookworks = bookworks.filter((item) => item.code.toLowerCase() !== String(code).trim().toLowerCase());
+            notifyBookworks();
+          },
+          clearBookworks: function() {
+            bookworks = [];
+            notifyBookworks();
+          },
+          updateBookworkInfo: function(code, info) {
+            const entry = bookworks.find((item) => item.code.toLowerCase() === String(code).trim().toLowerCase());
+            if (entry) entry.info = String(info || "");
+            notifyBookworks();
           }
         };
       })();

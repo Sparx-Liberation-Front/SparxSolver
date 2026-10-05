@@ -346,11 +346,30 @@ setInterval(async () => {
     } catch (e) {}
 }, 2000);
 
-chrome.storage.local.get(["bookworkMemory"], async data => {
-    const memory = data.bookworkMemory || {};
-    renderBookworkUI(memory);
+async function loadBookworkMemory() {
+    const storedData = await chrome.storage.local.get(["bookworkMemory", "deletedBookworks"]);
+    const localMemory = Object.fromEntries(
+        Object.entries(storedData.bookworkMemory || {}).map(([code, value]) => [code, normaliseBookwork(value, code)])
+    );
+    const deletedSet = storedData.deletedBookworks || {};
+
+    try {
+        const response = await fetch("http://localhost:3000/bookwork");
+        if (response.ok) {
+            const data = await response.json();
+            (data.bookworks || []).forEach(entry => {
+                if (!deletedSet[entry.code]) localMemory[entry.code] = normaliseBookwork(entry, entry.code);
+            });
+        }
+    } catch (e) {}
+
+    currentBookworkMemory = localMemory;
+    await chrome.storage.local.set({ bookworkMemory: currentBookworkMemory });
+    renderBookworkUI(currentBookworkMemory);
     await syncBookworks();
-});
+}
+
+loadBookworkMemory();
 
 
 

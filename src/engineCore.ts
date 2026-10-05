@@ -31,29 +31,6 @@ export const toolDeclarations = [
     }
   },
   {
-    name: 'batch_interactions',
-    description: 'Execute several page interactions in order after you have inspected the current screen. Use this once for all answer boxes and required clicks instead of calling playwright_fill or playwright_click repeatedly. Each action must use a fresh selector from the latest screenshot or click result.',
-    parameters: {
-      type: 'OBJECT',
-      properties: {
-        actions: {
-          type: 'ARRAY',
-          description: 'Ordered actions. Use {"action":"fill","selector":"[data-ai-id=\"15\"]","value":"5"} for answer boxes or {"action":"click","selector":"[data-ai-id=\"16\"]"} for buttons.',
-          items: {
-            type: 'OBJECT',
-            properties: {
-              action: { type: 'STRING', enum: ['click', 'fill'] },
-              selector: { type: 'STRING' },
-              value: { type: 'STRING' }
-            },
-            required: ['action', 'selector']
-          }
-        }
-      },
-      required: ['actions']
-    }
-  },
-  {
     name: 'calculate_answer',
     description: 'Use this tool to write out your step-by-step mathematical working, determine the final answer, and estimate a realistic time range in seconds (min and max) that an average human student would take to solve this specific question BEFORE you fill any slots.',
     parameters: {
@@ -121,8 +98,7 @@ export const systemInstruction = [
   "-- TYPE 2: NORMAL QUESTION --",
   "Detected when the page shows a new maths question to solve.",
   "GRAPH QUESTIONS: If a graph, chart, coordinate grid, canvas, SVG, or plotted image is visible, inspect the graph crop carefully. Read the axis labels, scale, origin, grid spacing, plotted points, intercepts, and line direction explicitly before calculating. Do not estimate from visual size alone; cross-check coordinates against tick spacing and state the coordinates in your working. If a label or point is unreadable, do not guess: inspect the DOM text or request another screenshot first.",
-  "BATCH ACTIONS: After calculating an answer, call batch_interactions once with all answer-box fills and required clicks in their exact order. This saves requests and avoids repeating the same tool call. Do not batch actions until the latest screenshot has provided valid selectors. On bookwork checks, use one batch for the matching option and Continue/Submit click if both are visible.",
-  "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with full working AND realistic min/max estimated human solving time in seconds (e.g. min: 12, max: 25). 3) Call batch_interactions once with every answer-box fill and required click in order. 4) Call task_done with bookwork_code AND answer.",
+  "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with full working AND realistic min/max estimated human solving time in seconds (e.g. min: 12, max: 25). 3) Use playwright_fill and playwright_click to enter the answer and submit it. 4) Call task_done with bookwork_code AND answer.",
 
   "-- FILLING SLOTS (playwright_fill rules) --",
   "The engine auto-handles clicking tiles or typing. For equations like y=mx+c, there are SEPARATE slots for gradient, sign (+/-), and intercept - fill each independently.",

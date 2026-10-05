@@ -113,7 +113,6 @@ import { toolDeclarations, systemInstruction, fallbackModels } from './engineCor
 
 const playwright_click = toolDeclarations.find(t => t.name === 'playwright_click') as any;
 const playwright_fill = toolDeclarations.find(t => t.name === 'playwright_fill') as any;
-const batch_interactions = toolDeclarations.find(t => t.name === 'batch_interactions') as any;
 const get_screenshot_and_html = toolDeclarations.find(t => t.name === 'get_screenshot_and_html') as any;
 const task_done = toolDeclarations.find(t => t.name === 'task_done') as any;
 const calculate_answer = toolDeclarations.find(t => t.name === 'calculate_answer') as any;
@@ -162,7 +161,7 @@ app.get('/bookwork', (req, res) => {
 
 app.post('/bookwork', (req, res) => {
   if (Array.isArray(req.body.bookworks)) {
-    bookworks = req.body.bookworks
+    const incoming = req.body.bookworks
       .filter((entry: any) => entry && typeof entry.code === 'string')
       .map((entry: any) => ({
         code: entry.code,
@@ -171,10 +170,32 @@ app.post('/bookwork', (req, res) => {
         info: typeof entry.info === 'string' ? entry.info : '',
         savedAt: typeof entry.savedAt === 'string' ? entry.savedAt : ''
       }));
+    const merged = new Map(bookworks.map(entry => [entry.code.trim().toLowerCase(), entry]));
+    incoming.forEach(entry => merged.set(entry.code.trim().toLowerCase(), {
+      ...merged.get(entry.code.trim().toLowerCase()),
+      ...entry,
+      working: entry.working || merged.get(entry.code.trim().toLowerCase())?.working || '',
+      info: entry.info || merged.get(entry.code.trim().toLowerCase())?.info || '',
+      savedAt: entry.savedAt || merged.get(entry.code.trim().toLowerCase())?.savedAt || ''
+    }));
+    bookworks = [...merged.values()];
     console.log(`[Server] 📖 Bookwork store updated via POST. Total entries: ${bookworks.length}`);
   }
   res.json({ bookworks });
 });
+
+async function readVisibleBookworkCode(page: Page): Promise<string> {
+  const text = await page.locator('body').innerText().catch(() => '');
+  const patterns = [
+    /bookwork\s*(?:code)?\s*[:#-]?\s*([0-9]{1,3}[A-Za-z]?)/i,
+    /(?:code|bookwork)\s+([0-9]{1,3}[A-Za-z]?)/i
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1].trim();
+  }
+  return '';
+}
 
 function escapeExportHtml(value: string): string {
   return String(value ?? '')
@@ -278,81 +299,6 @@ app.delete('/bookwork/:code', (req, res) => {
   res.json({ status: 'cleared_single', code });
 });
 
-async function executeBatchInteractions(page: Page, actions: any[]): Promise<any> {
-  const results: any[] = [];
-  const normalise = (value: string) => value
-    .replace(/\s+/g, '')
-    .replace(/[\u2212\u2013\u2014]/g, '-')
-    .replace(/\\frac\{(\d+)\}\{(\d+)\}/g, '$1/$2');
-
-  for (const [index, action] of actions.entries()) {
-    if (!action || !['click', 'fill'].includes(action.action) || typeof action.selector !== 'string') {
-      results.push({ index, error: 'Invalid action. Use click/fill with a selector.' });
-      continue;
-    }
-
-    const element = page.locator(action.selector).first();
-    if (await element.count() === 0) {
-      results.push({ index, error: `Selector ${action.selector} not found.` });
-      continue;
-    }
-
-    if (action.action === 'click') {
-      await element.click({ force: true });
-      await page.waitForTimeout(350);
-      results.push({ index, status: 'clicked' });
-      continue;
-    }
-
-    const value = String(action.value ?? '').trim();
-    const editable = await element.evaluate((node: Element) => {
-      const tag = node.tagName.toLowerCase();
-      return (tag === 'input' && ['text', 'number', 'search', ''].includes((node as HTMLInputElement).type?.toLowerCase() || '')) ||
-        tag === 'textarea' || (node as HTMLElement).isContentEditable;
-    });
-
-    if (editable) {
-      await element.fill(value);
-      results.push({ index, status: 'filled' });
-      continue;
-    }
-
-    await element.click({ force: true });
-    await page.waitForTimeout(500);
-    const tiles = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role="button"], [tabindex="0"], [tabindex="-1"]'))
-      .map((node, tileIndex) => ({
-        selector: `[data-batch-tile="${tileIndex}"]`,
-        text: node.querySelector('.katex-mathml annotation')?.textContent?.trim() || (node as HTMLElement).innerText?.trim().replace(/\s+/g, '') || '',
-        node
-      }))
-      .filter(tile => tile.text)
-      .map(tile => {
-        tile.node.setAttribute('data-batch-tile', String(tile.selector.match(/(\d+)"\]$/)?.[1] || '0'));
-        return { selector: tile.selector, text: tile.text };
-      }));
-    const exact = tiles.find(tile => normalise(tile.text) === normalise(value));
-    if (exact) {
-      await page.locator(exact.selector).first().click({ force: true });
-      results.push({ index, status: 'filled' });
-      continue;
-    }
-
-    let matched = true;
-    for (const character of value) {
-      const tile = tiles.find(candidate => normalise(candidate.text) === normalise(character));
-      if (!tile) {
-        matched = false;
-        break;
-      }
-      await page.locator(tile.selector).first().click({ force: true });
-      await page.waitForTimeout(120);
-    }
-    results.push({ index, status: matched ? 'filled' : 'no matching keypad tile' });
-  }
-
-  return { results, completed: results.every(result => !result.error && result.status !== 'no matching keypad tile') };
-}
-
 
 
 
@@ -380,7 +326,7 @@ async function startAutomation(apiKeys: string[]) {
       let isBookworkCheck = false;
       
       const config = {
-        tools: [{ functionDeclarations: [playwright_click, playwright_fill, batch_interactions, playwright_evaluate, get_screenshot_and_html, task_done, calculate_answer, get_bookwork_answer] }],
+        tools: [{ functionDeclarations: [playwright_click, playwright_fill, playwright_evaluate, get_screenshot_and_html, task_done, calculate_answer, get_bookwork_answer] }],
         systemInstruction: [
           "You are a Sparx Maths agent. There are TWO types of screen you will encounter:",
 
@@ -391,15 +337,14 @@ async function startAutomation(apiKeys: string[]) {
           "2) Read the bookwork code requested (e.g. '4B' or '12').",
           "3) Call get_bookwork_answer(bookwork_code) to retrieve the saved answer for that code.",
           "4) Compare the retrieved answer against all interactive elements / options on the screen. Match by value, LaTeX expression, or text (e.g. '5', 'x = 2', '1/2', '3.14').",
-          "5) Call batch_interactions once with the matching option and any visible Submit/Continue click in order.",
+          "5) Use playwright_click for the matching option and any visible Submit/Continue click.",
           "7) Call task_done.",
           "IMPORTANT: Do NOT call calculate_answer on bookwork check screens. Always look up and select the stored bookwork answer. Do not call task_done until get_bookwork_answer has returned found:true.",
 
           "-- TYPE 2: NORMAL QUESTION --",
           "Detected when the page shows a new maths question to solve.",
           "GRAPH QUESTIONS: If a graph, chart, coordinate grid, canvas, SVG, or plotted image is visible, inspect the graph crop carefully. Read the axis labels, scale, origin, grid spacing, plotted points, intercepts, and line direction explicitly before calculating. Do not estimate from visual size alone; cross-check coordinates against tick spacing and state the coordinates in your working. If a label or point is unreadable, do not guess: inspect the DOM text or request another screenshot first.",
-          "BATCH ACTIONS: After calculating an answer, call batch_interactions once with all answer-box fills and required clicks in their exact order. This saves requests and avoids repeating the same tool call. Do not batch actions until the latest screenshot has provided valid selectors. On bookwork checks, use one batch for the matching option and Continue/Submit click if both are visible.",
-          "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with concise, line-by-line working, a final verification line beginning with 'Check:', and a random human-like delay range (min_human_delay_seconds, max_human_delay_seconds). Wrap every mathematical expression in $...$ for KaTeX. YOU MUST WAIT FOR THE SERVER TO FINISH THE DELAY. DO NOT call any other tool until the calculate_answer tool response returns successfully after the wait. 3) AFTER the calculate_answer wait, call batch_interactions once with every answer-box fill in order. 4) Call task_done with bookwork_code AND answer.",
+          "How to handle: 1) Call get_screenshot_and_html. 2) Call calculate_answer with concise, line-by-line working, a final verification line beginning with 'Check:', and a random human-like delay range (min_human_delay_seconds, max_human_delay_seconds). Wrap every mathematical expression in $...$ for KaTeX. YOU MUST WAIT FOR THE SERVER TO FINISH THE DELAY. DO NOT call any other tool until the calculate_answer tool response returns successfully after the wait. 3) AFTER the calculate_answer wait, use playwright_fill and playwright_click to enter and submit the answer. 4) Call task_done with bookwork_code AND answer.",
 
           "-- FILLING SLOTS (playwright_fill rules) --",
           "The server auto-handles clicking tiles or typing. For equations like y=mx+c, there are SEPARATE slots for gradient, sign (+/-), and intercept - fill each independently.",
@@ -503,13 +448,7 @@ async function startAutomation(apiKeys: string[]) {
         if (!page) throw new Error("Browser page lost.");
 
         try {
-          if (toolCall.name === 'batch_interactions') {
-            const actions = Array.isArray(toolCall.args?.actions) ? toolCall.args.actions.slice(0, 30) : [];
-            toolResult = actions.length
-              ? await executeBatchInteractions(page, actions)
-              : { error: 'No actions supplied. Provide an ordered actions array.' };
-          }
-          else if (toolCall.name === 'playwright_click') {
+          if (toolCall.name === 'playwright_click') {
             const el = page.locator(toolCall.args.selector as string).first();
             if (await el.count() > 0) {
               await el.click({ force: true });
@@ -872,8 +811,17 @@ async function startAutomation(apiKeys: string[]) {
           else if (toolCall.name === 'task_done') {
             previousMemory = toolCall.args.memory_for_next_part || "";
             
-            const bwCode = toolCall.args.bookwork_code;
-            const bwAnswer = toolCall.args.answer;
+            let bwCode = String(toolCall.args.bookwork_code || '').trim();
+            let bwAnswer = String(toolCall.args.answer || '').trim();
+            if (!isBookworkCheck) {
+              if (!bwCode) bwCode = await readVisibleBookworkCode(page);
+              if (!bwAnswer && currentCalculation?.answer) bwAnswer = currentCalculation.answer;
+            } else if (bookworkLookup?.found) {
+              if (!bwCode) bwCode = bookworkLookup.code;
+              if (!bwAnswer) {
+                bwAnswer = bookworks.find(entry => entry.code.trim().toLowerCase() === bookworkLookup?.code.toLowerCase())?.answer || '';
+              }
+            }
             if (bookworkLookup && !bookworkLookup.found) {
               isDone = false;
               toolResult = {
