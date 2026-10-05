@@ -71,7 +71,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -81,7 +80,7 @@ jobs:
       - name: Install dependencies and build bundles
         shell: bash
         run: |
-          npm ci
+          npm install
           npm run build:all
           python -m pip install --upgrade pip
           python -m pip install pyinstaller customtkinter pillow
@@ -147,7 +146,7 @@ jobs:
           if-no-files-found: error
 
   ios:
-    name: Build signed iOS IPA
+    name: Build iOS IPA
     if: inputs.platforms == 'all' || inputs.platforms == 'mobile' || inputs.platforms == 'ios'
     runs-on: macos-latest
     defaults:
@@ -156,18 +155,6 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-
-      - name: Check Apple signing configuration
-        env:
-          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          test -n "$APPLE_CERTIFICATE_BASE64" || { echo 'Missing APPLE_CERTIFICATE_BASE64'; exit 1; }
-          test -n "$APPLE_PROVISIONING_PROFILE_BASE64" || { echo 'Missing APPLE_PROVISIONING_PROFILE_BASE64'; exit 1; }
-          test -n "$APPLE_CERTIFICATE_PASSWORD" || { echo 'Missing APPLE_CERTIFICATE_PASSWORD'; exit 1; }
-          test -n "$APPLE_TEAM_ID" || { echo 'Missing APPLE_TEAM_ID'; exit 1; }
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -183,37 +170,8 @@ jobs:
           flutter analyze
           flutter test
 
-      - name: Install Apple signing certificate and profile
-        env:
-          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || github.run_id }}
-        run: |
-          certificate_path="$RUNNER_TEMP signing certificate.p12"
-          profile_path="$RUNNER_TEMP profile.mobileprovision"
-          keychain_path="$RUNNER_TEMP signing.keychain-db"
-          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
-          echo "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$profile_path"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
-          security list-keychains -d user -s "$keychain_path"
-          security default-keychain -s "$keychain_path"
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          profile_plist="$RUNNER_TEMP profile.plist"
-          security cms -D -i "$profile_path" > "$profile_plist"
-          profile_uuid=$(/usr/libexec/PlistBuddy -c 'Print:UUID' "$profile_plist")
-          profile_name=$(/usr/libexec/PlistBuddy -c 'Print:Name' "$profile_plist")
-          cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
-          sed "s/__APPLE_TEAM_ID__/$APPLE_TEAM_ID/g; s/__PROVISIONING_PROFILE_NAME__/$profile_name/g" ios/ExportOptions.plist.template > ios/ExportOptions.plist
-          sed -i '' "/PRODUCT_BUNDLE_IDENTIFIER = com.sparxsolver.mobileApp;/a\\
-          \\t\\t\\t\\tDEVELOPMENT_TEAM = $APPLE_TEAM_ID;" ios/Runner.xcodeproj/project.pbxproj
-
-      - name: Build signed iOS IPA
-        run: flutter build ipa --release --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}" --export-options-plist=ios/ExportOptions.plist
+      - name: Build iOS IPA without code signing
+        run: flutter build ipa --release --no-codesign --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}"
 
       - name: Rename iOS artifact
         run: |
