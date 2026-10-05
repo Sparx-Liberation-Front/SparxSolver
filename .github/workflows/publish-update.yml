@@ -170,14 +170,17 @@ jobs:
           flutter analyze
           flutter test
 
-      - name: Build iOS IPA without code signing
-        run: flutter build ipa --release --no-codesign --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}"
+      - name: Build iOS app without code signing
+        run: flutter build ios --release --no-codesign --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}"
 
-      - name: Rename iOS artifact
+      - name: Package unsigned iOS app as IPA
         run: |
-          ipa_path=$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' | head -n 1)
-          test -n "$ipa_path"
-          cp "$ipa_path" sparxsolver-installer-ios.ipa
+          app_path=$(find build/ios -type d -name 'Runner.app' | head -n 1)
+          test -n "$app_path"
+          rm -rf ipa_payload sparxsolver-installer-ios.ipa
+          mkdir -p ipa_payload/Payload
+          cp -R "$app_path" ipa_payload/Payload/Runner.app
+          (cd ipa_payload && zip -qry ../sparxsolver-installer-ios.ipa Payload)
 
       - name: Upload iOS artifact
         uses: actions/upload-artifact@v4
