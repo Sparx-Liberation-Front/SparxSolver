@@ -161,7 +161,7 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
     await _webViewController?.evaluateJavascript(source: 'SparxEngine.updateBookworkInfo(${jsonEncode(code)}, ${jsonEncode(info)});');
   }
 
-  String _bookworkMarkdown() => _bookworks.map((entry) => [
+  String _bookworkMarkdown() => '${_bookworks.map((entry) => [
         '## Bookwork ${entry['code']}',
         entry['savedAt'] == null ? '' : '**Saved:** ${entry['savedAt']}',
         '**Answer:** ${entry['answer']}',
@@ -169,7 +169,7 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
         '### Working',
         (entry['working'] as String?)?.isNotEmpty == true ? entry['working'] : 'Working not captured.',
         (entry['info'] as String?)?.isNotEmpty == true ? '\n### Notes\n${entry['info']}' : ''
-      ].join('\n')).join('\n\n') + '\n';
+      ].join('\n')).join('\n\n')}\n';
 
   Future<void> _showBookworkExport() async {
     final export = _bookworkMarkdown();
