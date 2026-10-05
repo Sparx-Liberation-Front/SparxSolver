@@ -17,14 +17,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: SparxSolver-Installer-linux
-            asset_pattern: "installer/dist/SparxSolver-Installer*"
+            output_name: sparxsolver-installer-linux
           - os: windows-latest
-            artifact_name: SparxSolver-Installer-windows
-            asset_pattern: "installer/dist/SparxSolver-Installer.exe"
+            output_name: sparxsolver-installer-windows.exe
           - os: macos-latest
-            artifact_name: SparxSolver-Installer-macos
-            asset_pattern: "installer/dist/SparxSolver-Installer*"
+            output_name: sparxsolver-installer-macos
 
     steps:
       - name: Checkout repository
@@ -54,9 +51,16 @@ jobs:
         run: |
           python build-installer-exe.py
 
+      - name: Rename installer
+        shell: bash
+        run: |
+          source_file=$(find installer/dist -maxdepth 1 -type f -name 'SparxSolver-Installer*' | head -n 1)
+          test -n "$source_file"
+          cp "$source_file" "${{ matrix.output_name }}"
+
       - name: Upload Installer Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.asset_pattern }}
+          name: ${{ matrix.output_name }}
+          path: ${{ matrix.output_name }}
           if-no-files-found: error

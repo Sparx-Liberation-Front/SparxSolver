@@ -1,0 +1,263 @@
+name: Build and Publish SparxSolver Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 1.2.0
+        required: true
+        type: string
+      build_number:
+        description: Mobile build number, increase this for every update
+        required: true
+        default: '1'
+        type: string
+      release_name:
+        description: GitHub release title
+        required: true
+        default: SparxSolver update
+        type: string
+      platforms:
+        description: Platforms to build
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - desktop
+          - mobile
+          - android
+          - ios
+      prerelease:
+        description: Mark this release as a prerelease
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: Create the release as a draft for review
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+
+jobs:
+  desktop:
+    name: Build desktop installer (${{ matrix.platform }})
+    if: inputs.platforms == 'all' || inputs.platforms == 'desktop'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            output_name: sparxsolver-installer-windows.exe
+          - platform: linux
+            os: ubuntu-latest
+            output_name: sparxsolver-installer-linux
+          - platform: macos
+            os: macos-latest
+            output_name: sparxsolver-installer-macos
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies and build bundles
+        shell: bash
+        run: |
+          npm ci
+          npm run build:all
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller customtkinter pillow
+
+      - name: Build installer
+        run: python build-installer-exe.py
+
+      - name: Rename installer
+        shell: bash
+        run: |
+          source_file=$(find installer/dist -maxdepth 1 -type f -name 'SparxSolver-Installer*' | head -n 1)
+          test -n "$source_file"
+          cp "$source_file" "${{ matrix.output_name }}"
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output_name }}
+          path: ${{ matrix.output_name }}
+          if-no-files-found: error
+
+  android:
+    name: Build Android APK
+    if: inputs.platforms == 'all' || inputs.platforms == 'mobile' || inputs.platforms == 'android'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile_app
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies and verify
+        run: |
+          [[ "${{ inputs.build_number }}" =~ ^[0-9]+$ ]] || { echo 'build_number must contain digits only'; exit 1; }
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: Build Android APK
+        run: flutter build apk --release --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}"
+
+      - name: Rename Android artifact
+        run: mv build/app/outputs/flutter-apk/app-release.apk "sparxsolver-installer-android.apk"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparxsolver-installer-android.apk
+          path: mobile_app/sparxsolver-installer-android.apk
+          if-no-files-found: error
+
+  ios:
+    name: Build signed iOS IPA
+    if: inputs.platforms == 'all' || inputs.platforms == 'mobile' || inputs.platforms == 'ios'
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mobile_app
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Check Apple signing configuration
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$APPLE_CERTIFICATE_BASE64" || { echo 'Missing APPLE_CERTIFICATE_BASE64'; exit 1; }
+          test -n "$APPLE_PROVISIONING_PROFILE_BASE64" || { echo 'Missing APPLE_PROVISIONING_PROFILE_BASE64'; exit 1; }
+          test -n "$APPLE_CERTIFICATE_PASSWORD" || { echo 'Missing APPLE_CERTIFICATE_PASSWORD'; exit 1; }
+          test -n "$APPLE_TEAM_ID" || { echo 'Missing APPLE_TEAM_ID'; exit 1; }
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Verify Flutter project
+        run: |
+          flutter analyze
+          flutter test
+
+      - name: Install Apple signing certificate and profile
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || github.run_id }}
+        run: |
+          certificate_path="$RUNNER_TEMP signing certificate.p12"
+          profile_path="$RUNNER_TEMP profile.mobileprovision"
+          keychain_path="$RUNNER_TEMP signing.keychain-db"
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
+          echo "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$profile_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          profile_plist="$RUNNER_TEMP profile.plist"
+          security cms -D -i "$profile_path" > "$profile_plist"
+          profile_uuid=$(/usr/libexec/PlistBuddy -c 'Print:UUID' "$profile_plist")
+          profile_name=$(/usr/libexec/PlistBuddy -c 'Print:Name' "$profile_plist")
+          cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
+          sed "s/__APPLE_TEAM_ID__/$APPLE_TEAM_ID/g; s/__PROVISIONING_PROFILE_NAME__/$profile_name/g" ios/ExportOptions.plist.template > ios/ExportOptions.plist
+          sed -i '' "/PRODUCT_BUNDLE_IDENTIFIER = com.sparxsolver.mobileApp;/a\\
+          \\t\\t\\t\\tDEVELOPMENT_TEAM = $APPLE_TEAM_ID;" ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Build signed iOS IPA
+        run: flutter build ipa --release --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}" --export-options-plist=ios/ExportOptions.plist
+
+      - name: Rename iOS artifact
+        run: |
+          ipa_path=$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' | head -n 1)
+          test -n "$ipa_path"
+          cp "$ipa_path" sparxsolver-installer-ios.ipa
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparxsolver-installer-ios.ipa
+          path: mobile_app/sparxsolver-installer-ios.ipa
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: always() && !cancelled() && (inputs.platforms == 'all' || inputs.platforms == 'desktop' || inputs.platforms == 'mobile' || inputs.platforms == 'android' || inputs.platforms == 'ios')
+    needs: [desktop, android, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Check required builds completed
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.platforms }}" in
+            all) test -f release-assets/sparxsolver-installer-windows.exe; test -f release-assets/sparxsolver-installer-linux; test -f release-assets/sparxsolver-installer-macos; test -f release-assets/sparxsolver-installer-android.apk; test -f release-assets/sparxsolver-installer-ios.ipa ;;
+            desktop) test -f release-assets/sparxsolver-installer-windows.exe; test -f release-assets/sparxsolver-installer-linux; test -f release-assets/sparxsolver-installer-macos ;;
+            mobile) test -f release-assets/sparxsolver-installer-android.apk; test -f release-assets/sparxsolver-installer-ios.ipa ;;
+            android) test -f release-assets/sparxsolver-installer-android.apk ;;
+            ios) test -f release-assets/sparxsolver-installer-ios.ipa ;;
+          esac
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: ${{ inputs.release_name }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: release-assets/*

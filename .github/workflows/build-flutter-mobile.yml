@@ -44,11 +44,14 @@ jobs:
       - name: Build Android release APK
         run: flutter build apk --release
 
+      - name: Rename Android artifact
+        run: mv build/app/outputs/flutter-apk/app-release.apk sparxsolver-installer-android.apk
+
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-android-apk
-          path: mobile_app/build/app/outputs/flutter-apk/app-release.apk
+          name: sparxsolver-installer-android.apk
+          path: mobile_app/sparxsolver-installer-android.apk
           if-no-files-found: error
 
   build-ios:
@@ -75,12 +78,18 @@ jobs:
           flutter analyze
           flutter test
 
-      - name: Build iOS release app (no codesign)
-        run: flutter build ios --release --no-codesign
+      - name: Build iOS release IPA (unsigned)
+        run: flutter build ipa --release --no-codesign
+
+      - name: Rename iOS artifact
+        run: |
+          ipa_path=$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' | head -n 1)
+          test -n "$ipa_path"
+          cp "$ipa_path" sparxsolver-ios-ci-unsigned.ipa
 
       - name: Upload iOS build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-ios-runner-app
-          path: mobile_app/build/ios/iphoneos/Runner.app
+          name: sparxsolver-ios-ci-unsigned.ipa
+          path: mobile_app/sparxsolver-ios-ci-unsigned.ipa
           if-no-files-found: error
