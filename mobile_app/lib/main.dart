@@ -2,7 +2,60 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_math_fork/flutter_math.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+const _ink = Color(0xFFE8EEF5);
+const _mutedInk = Color(0xFFAAB7C5);
+const _background = Color(0xFF10161D);
+const _panel = Color(0xFF1B242D);
+const _panelRaised = Color(0xFF26333E);
+const _accent = Color(0xFF2F9E9A);
+const _accentStrong = Color(0xFF237A78);
+
+class MathMarkup extends StatelessWidget {
+  const MathMarkup(this.value, {super.key, this.fontSize = 14, this.color = _ink});
+
+  final String value;
+  final double fontSize;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = RegExp(r'(\$\$.*?\$\$|\$.*?\$|\\\(.*?\\\)|\\\[.*?\\\])', dotAll: true)
+        .allMatches(value)
+        .toList();
+    if (parts.isEmpty) return Text(value, style: TextStyle(color: color, fontSize: fontSize, height: 1.35));
+
+    final children = <Widget>[];
+    var cursor = 0;
+    for (final match in parts) {
+      if (match.start > cursor) {
+        children.add(Text(value.substring(cursor, match.start), style: TextStyle(color: color, fontSize: fontSize, height: 1.35)));
+      }
+      var expression = match.group(0)!;
+      final display = expression.startsWith(r'$$') || expression.startsWith(r'\[');
+      if (expression.startsWith(r'$$')) expression = expression.substring(2, expression.length - 2);
+      if (expression.startsWith(r'$')) expression = expression.substring(1, expression.length - 1);
+      if (expression.startsWith(r'\(')) expression = expression.substring(2, expression.length - 2);
+      if (expression.startsWith(r'\[')) expression = expression.substring(2, expression.length - 2);
+      children.add(Padding(
+        padding: EdgeInsets.symmetric(vertical: display ? 4 : 0),
+        child: Math.tex(
+          expression,
+          mathStyle: display ? MathStyle.display : MathStyle.text,
+          textStyle: TextStyle(color: color, fontSize: fontSize),
+          onErrorFallback: (error) => Text(expression, style: TextStyle(color: color, fontSize: fontSize)),
+        ),
+      ));
+      cursor = match.end;
+    }
+    if (cursor < value.length) {
+      children.add(Text(value.substring(cursor), style: TextStyle(color: color, fontSize: fontSize, height: 1.35)));
+    }
+    return Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: children);
+  }
+}
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,11 +71,18 @@ class SparxSolverApp extends StatelessWidget {
       title: 'SparxSolver',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F0F1A),
+        scaffoldBackgroundColor: _background,
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF6C63FF),
-          secondary: Color(0xFFA78BFA),
-          surface: Color(0xFF1A1A2E),
+          primary: _accent,
+          secondary: Color(0xFF72C7C1),
+          surface: _panel,
+          onPrimary: Colors.white,
+          onSurface: _ink,
+        ),
+        appBarTheme: const AppBarTheme(backgroundColor: _panel, foregroundColor: _ink),
+        drawerTheme: const DrawerThemeData(backgroundColor: _panel),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(backgroundColor: _accentStrong, foregroundColor: Colors.white),
         ),
       ),
       home: const SparxBrowserScreen(),
@@ -208,12 +268,12 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: const Color(0xFF1A1A2E),
+        backgroundColor: _panel,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('SparxSolver', style: TextStyle(fontWeight: FontWeight.bold)),
-            Text(_statusText, style: TextStyle(fontSize: 11, color: _statusLevel == 'warn' ? Colors.amber : Colors.white70)),
+            Text(_statusText, style: TextStyle(fontSize: 11, color: _statusLevel == 'warn' ? const Color(0xFFF0B35B) : _mutedInk)),
           ],
         ),
         actions: [
@@ -233,7 +293,7 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
                       top: 0,
                       child: Container(
                         padding: const EdgeInsets.all(2),
-                        decoration: const BoxDecoration(color: Color(0xFF6C63FF), shape: BoxShape.circle),
+                        decoration: const BoxDecoration(color: _accent, shape: BoxShape.circle),
                         constraints: const BoxConstraints(minWidth: 10, minHeight: 10),
                       ),
                     )
@@ -253,19 +313,19 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
         ],
       ),
       drawer: Drawer(
-        backgroundColor: const Color(0xFF0F0F1A),
+        backgroundColor: _background,
         child: SafeArea(
           child: Column(
             children: [
               Container(
                 padding: const EdgeInsets.all(16),
-                color: const Color(0xFF1A1A2E),
+                color: _panel,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.terminal, color: Color(0xFFA78BFA)),
+                        const Icon(Icons.terminal, color: _accent),
                         const SizedBox(width: 8),
                         const Text('Live Logs', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
                         const SizedBox(width: 6),
@@ -299,11 +359,11 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
                       if (logText.contains('[JS ERR]') || logText.contains('Error')) {
                         logColor = Colors.redAccent;
                       } else if (logText.contains('[JS WARN]')) {
-                        logColor = Colors.amberAccent;
+                        logColor = const Color(0xFFF0B35B);
                       } else if (logText.contains('🤖 AI Tool:')) {
-                        logColor = const Color(0xFF60A5FA);
+                        logColor = const Color(0xFF72B7D8);
                       } else if (logText.contains('✓ Question Finished')) {
-                        logColor = const Color(0xFF4ADE80);
+                        logColor = const Color(0xFF72C7C1);
                       }
 
                       return Padding(
@@ -322,7 +382,7 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
         ),
       ),
       endDrawer: Drawer(
-        backgroundColor: const Color(0xFF1A1A2E),
+        backgroundColor: _panel,
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: ListView(
@@ -335,11 +395,11 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
                 controller: _apiKeyController,
                 maxLines: _showApiKeys ? 4 : 1,
                 obscureText: !_showApiKeys,
-                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace', color: _ink),
                 decoration: const InputDecoration(
                   border: OutlineInputBorder(),
                   hintText: 'AIzaSy...',
-                  fillColor: Color(0xFF0F0F1A),
+                  fillColor: _background,
                   filled: true,
                   suffixIcon: Icon(Icons.key),
                 ),
@@ -360,8 +420,9 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
               ElevatedButton.icon(
                 onPressed: _toggleAutomation,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: _isAutomationRunning ? Colors.redAccent : const Color(0xFF6C63FF),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  backgroundColor: _isAutomationRunning ? const Color(0xFFB94A52) : _accentStrong,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
                 icon: Icon(_isAutomationRunning ? Icons.stop : Icons.play_arrow),
                 label: Text(_isAutomationRunning ? 'Stop Automation' : 'Start Automation'),
@@ -380,17 +441,17 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
               const Divider(),
               if (_bookworks.isEmpty) const Text('No saved bookworks yet.', style: TextStyle(fontSize: 12, color: Colors.grey)),
               ..._bookworks.map((b) => Card(
-                color: const Color(0xFF252542),
+                color: _panelRaised,
                 child: ExpansionTile(
                   title: Text('Code ${b['code']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  subtitle: Text('Answer: ${b['answer']}', style: const TextStyle(color: Color(0xFFA78BFA), fontSize: 12)),
+                  subtitle: MathMarkup('Answer: ${b['answer']}', fontSize: 12, color: const Color(0xFF72C7C1)),
                   trailing: IconButton(
                     icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                     onPressed: () => _deleteBookwork('${b['code']}'),
                   ),
                   children: [
                     if ((b['working'] as String? ?? '').isNotEmpty)
-                      Padding(padding: const EdgeInsets.all(12), child: SelectableText(b['working'] as String)),
+                      Padding(padding: const EdgeInsets.all(12), child: MathMarkup(b['working'] as String)),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
                       child: TextFormField(
