@@ -2,12 +2,20 @@ import express from 'express';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { BrowserContext, Page } from 'playwright';
 import { GoogleGenAI, Type, FunctionDeclaration } from '@google/genai';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use(limiter);
 const serverDir = path.resolve(process.cwd(), 'server');
 const fallbackServerDir = path.resolve(__dirname, '../server');
 app.use(express.static(serverDir));
