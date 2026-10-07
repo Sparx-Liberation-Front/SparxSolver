@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -9,7 +10,6 @@ const _ink = Color(0xFFE8EEF5);
 const _mutedInk = Color(0xFFAAB7C5);
 const _background = Color(0xFF10161D);
 const _panel = Color(0xFF1B242D);
-const _panelRaised = Color(0xFF26333E);
 const _accent = Color(0xFF2F9E9A);
 const _accentStrong = Color(0xFF237A78);
 
@@ -98,14 +98,16 @@ class SparxBrowserScreen extends StatefulWidget {
 }
 
 class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
-  InAppWebViewController? _webViewController;
-  final TextEditingController _apiKeyController = TextEditingController();
+  InAppWebViewController? _browserViewController;
+  HttpServer? _server;
+  int _currentTab = 0; // 0: Browser, 1: Extension Sidepanel
+  
   final List<String> _logs = [];
   final List<Map<String, dynamic>> _bookworks = [];
   bool _isAutomationRunning = false;
   String _statusText = 'Idle';
   String _statusLevel = 'info';
-  bool _showApiKeys = false;
+
   final Map<String, double> _settings = {
     'minDelaySeconds': 2,
     'maxDelaySeconds': 20,
@@ -117,32 +119,35 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSavedApiKeys();
+    _loadSavedState();
+    _startLocalServer();
   }
 
-  Future<void> _loadSavedApiKeys() async {
+  @override
+  void dispose() {
+    _server?.close(force: true);
+    super.dispose();
+  }
+
+  Future<void> _loadSavedState() async {
     final prefs = await SharedPreferences.getInstance();
-    final keys = prefs.getString('api_keys') ?? '';
     final savedSettings = prefs.getString('ai_settings');
     final savedBookworks = prefs.getString('bookworks');
     if (savedSettings != null) {
-      final decoded = jsonDecode(savedSettings) as Map<String, dynamic>;
-      decoded.forEach((key, value) {
-        if (_settings.containsKey(key)) _settings[key] = (value as num).toDouble();
-      });
+      try {
+        final decoded = jsonDecode(savedSettings) as Map<String, dynamic>;
+        decoded.forEach((key, value) {
+          if (_settings.containsKey(key)) _settings[key] = (value as num).toDouble();
+        });
+      } catch (_) {}
     }
     if (savedBookworks != null) {
-      final decoded = jsonDecode(savedBookworks) as List<dynamic>;
-      _bookworks.addAll(decoded.map((item) => Map<String, dynamic>.from(item as Map)));
+      try {
+        final decoded = jsonDecode(savedBookworks) as List<dynamic>;
+        _bookworks.addAll(decoded.map((item) => Map<String, dynamic>.from(item as Map)));
+      } catch (_) {}
     }
-    setState(() {
-      _apiKeyController.text = keys;
-    });
-  }
-
-  Future<void> _saveApiKeys(String keys) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('api_keys', keys);
+    setState(() {});
   }
 
   Future<void> _saveMobileState() async {
@@ -160,38 +165,131 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
     });
   }
 
-  void _toggleAutomation() async {
-    final rawKeys = _apiKeyController.text.trim();
-    if (rawKeys.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter at least one Gemini API Key!')),
-      );
-      return;
+  Future<void> _startLocalServer() async {
+    try {
+      _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 3000);
+      _server!.listen((HttpRequest request) async {
+        final path = request.uri.path;
+        final method = request.method;
+
+        request.response.headers.add('Access-Control-Allow-Origin', '*');
+        request.response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        request.response.headers.add('Access-Control-Allow-Headers', 'Content-Type');
+
+        if (method == 'OPTIONS') {
+          request.response.statusCode = HttpStatus.ok;
+          await request.response.close();
+          return;
+        }
+
+        if (path == '/status') {
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({
+            'running': _isAutomationRunning,
+            'status': {'text': _statusText, 'level': _statusLevel}
+          }));
+          await request.response.close();
+        } else if (path == '/settings') {
+          if (method == 'POST') {
+            final content = await utf8.decoder.bind(request).join();
+            try {
+              final data = jsonDecode(content);
+              if (data is Map) {
+                data.forEach((k, v) {
+                  if (_settings.containsKey(k)) _settings[k] = (v as num).toDouble();
+                });
+                _saveMobileState();
+              }
+            } catch (_) {}
+          }
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({'settings': _settingsPayload()}));
+          await request.response.close();
+        } else if (path == '/start') {
+          if (method == 'POST') {
+            final content = await utf8.decoder.bind(request).join();
+            try {
+              final data = jsonDecode(content);
+              final keys = (data['apiKeys'] as List<dynamic>? ?? []).map((e) => e.toString()).toList();
+              if (data['settings'] != null) {
+                final s = data['settings'] as Map<String, dynamic>;
+                s.forEach((k, v) {
+                  if (_settings.containsKey(k)) _settings[k] = (v as num).toDouble();
+                });
+                _saveMobileState();
+              }
+              if (keys.isNotEmpty) {
+                setState(() => _isAutomationRunning = true);
+                await _browserViewController?.evaluateJavascript(
+                  source: "SparxEngine.startAutomation(${jsonEncode(keys)}, ${jsonEncode(_settingsPayload())});"
+                );
+                request.response.write('Started');
+              } else {
+                request.response.statusCode = HttpStatus.badRequest;
+                request.response.write('No API keys provided');
+              }
+            } catch (e) {
+              request.response.statusCode = HttpStatus.badRequest;
+              request.response.write('Error: $e');
+            }
+          } else {
+            request.response.statusCode = HttpStatus.methodNotAllowed;
+          }
+          await request.response.close();
+        } else if (path == '/stop') {
+          setState(() => _isAutomationRunning = false);
+          await _browserViewController?.evaluateJavascript(source: "SparxEngine.stopAutomation();");
+          request.response.write('Stopped');
+          await request.response.close();
+        } else if (path == '/bookwork') {
+          if (method == 'POST') {
+            final content = await utf8.decoder.bind(request).join();
+            try {
+              final data = jsonDecode(content);
+              if (data['bookworks'] != null) {
+                _handleBookworkSync(data);
+              }
+            } catch (_) {}
+          }
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({'bookworks': _bookworks}));
+          await request.response.close();
+        } else {
+          var assetPath = path == '/' || path.isEmpty ? '/sidepanel.html' : path;
+          if (assetPath.startsWith('/')) assetPath = assetPath.substring(1);
+          final fullAssetKey = 'assets/extension_dist/$assetPath';
+          try {
+            final byteData = await rootBundle.load(fullAssetKey);
+            final bytes = byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes);
+            
+            if (assetPath.endsWith('.html')) {
+              request.response.headers.contentType = ContentType.html;
+            } else if (assetPath.endsWith('.js')) {
+              request.response.headers.contentType = ContentType('application', 'javascript');
+            } else if (assetPath.endsWith('.css')) {
+              request.response.headers.contentType = ContentType('text', 'css');
+            } else if (assetPath.endsWith('.png')) {
+              request.response.headers.contentType = ContentType('image', 'png');
+            } else if (assetPath.endsWith('.woff')) {
+              request.response.headers.contentType = ContentType('font', 'woff');
+            } else if (assetPath.endsWith('.woff2')) {
+              request.response.headers.contentType = ContentType('font', 'woff2');
+            } else if (assetPath.endsWith('.ttf')) {
+              request.response.headers.contentType = ContentType('font', 'ttf');
+            }
+            request.response.add(bytes);
+            await request.response.close();
+          } catch (e) {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write('Asset not found: $assetPath');
+            await request.response.close();
+          }
+        }
+      });
+      _addLog('Embedded Dart HTTP Server running on port 3000', 'info');
+    } catch (e) {
+      _addLog('Failed to start local HTTP server: $e', 'error');
     }
-
-    final keysList = rawKeys.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
-    await _saveApiKeys(rawKeys);
-
-    if (_isAutomationRunning) {
-      await _webViewController?.evaluateJavascript(source: "SparxEngine.stopAutomation();");
-      setState(() => _isAutomationRunning = false);
-    } else {
-      final jsonKeys = jsonEncode(keysList);
-      final jsonSettings = jsonEncode(_settingsPayload());
-      await _webViewController?.evaluateJavascript(source: "SparxEngine.startAutomation($jsonKeys, $jsonSettings);");
-      setState(() => _isAutomationRunning = true);
-    }
-  }
-
-  void _setSetting(String key, String value) {
-    final parsed = double.tryParse(value);
-    if (parsed == null) return;
-    setState(() {
-      _settings[key] = parsed.clamp(key == 'maxRequestAttempts' ? 1 : 0, key == 'requestTimeoutSeconds' ? 300 : key == 'maxRequestAttempts' ? 10 : 300).toDouble();
-      if (key == 'minDelaySeconds' && _settings['maxDelaySeconds']! < parsed) _settings['maxDelaySeconds'] = parsed;
-      if (key == 'maxDelaySeconds' && parsed < _settings['minDelaySeconds']!) _settings['minDelaySeconds'] = parsed;
-    });
-    _saveMobileState();
   }
 
   void _handleBookworkSync(dynamic payload) {
@@ -209,59 +307,74 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
     _saveMobileState();
   }
 
-  Future<void> _deleteBookwork(String code) async {
-    await _webViewController?.evaluateJavascript(source: 'SparxEngine.deleteBookwork(${jsonEncode(code)});');
-  }
-
-  Future<void> _clearBookworks() async {
-    await _webViewController?.evaluateJavascript(source: 'SparxEngine.clearBookworks();');
-  }
-
-  Future<void> _saveBookworkInfo(String code, String info) async {
-    await _webViewController?.evaluateJavascript(source: 'SparxEngine.updateBookworkInfo(${jsonEncode(code)}, ${jsonEncode(info)});');
-  }
-
-  String _bookworkMarkdown() => '${_bookworks.map((entry) => [
-        '## Bookwork ${entry['code']}',
-        entry['savedAt'] == null ? '' : '**Saved:** ${entry['savedAt']}',
-        '**Answer:** ${entry['answer']}',
-        '',
-        '### Working',
-        (entry['working'] as String?)?.isNotEmpty == true ? entry['working'] : 'Working not captured.',
-        (entry['info'] as String?)?.isNotEmpty == true ? '\n### Notes\n${entry['info']}' : ''
-      ].join('\n')).join('\n\n')}\n';
-
-  Future<void> _showBookworkExport() async {
-    final export = _bookworkMarkdown();
-    await showDialog<void>(
+  void _showLogsWindow() {
+    showModalBottomSheet(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Bookwork Markdown'),
-        content: SizedBox(width: 560, child: SingleChildScrollView(child: SelectableText(export))),
-        actions: [
-          TextButton(onPressed: () { Clipboard.setData(ClipboardData(text: export)); Navigator.pop(context); }, child: const Text('Copy')),
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
-        ],
+      isScrollControlled: true,
+      backgroundColor: _background,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.75,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.terminal, color: _accent),
+                    const SizedBox(width: 8),
+                    const Text('App Logs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                    const SizedBox(width: 6),
+                    Text('(${_logs.length})', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  ],
+                ),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.grey),
+                      onPressed: () => setState(() => _logs.clear()),
+                      tooltip: 'Clear Logs',
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                )
+              ],
+            ),
+            const Divider(),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _logs.length,
+                itemBuilder: (context, index) {
+                  final logText = _logs[index];
+                  Color logColor = Colors.white70;
+                  if (logText.contains('[JS ERR]') || logText.contains('Error')) {
+                    logColor = Colors.redAccent;
+                  } else if (logText.contains('[JS WARN]')) {
+                    logColor = const Color(0xFFF0B35B);
+                  } else if (logText.contains('🤖 AI Tool:')) {
+                    logColor = const Color(0xFF72B7D8);
+                  } else if (logText.contains('✓ Question Finished')) {
+                    logColor = const Color(0xFF72C7C1);
+                  }
+
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2.0),
+                    child: SelectableText(
+                      logText,
+                      style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: logColor),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
-  }
-
-  Widget _settingField(String label, String key) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: TextFormField(
-        initialValue: _settings[key]!.round().toString(),
-        keyboardType: TextInputType.number,
-        decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
-        onChanged: (value) => _setSetting(key, value),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _apiKeyController.dispose();
-    super.dispose();
   }
 
   @override
@@ -272,242 +385,93 @@ class _SparxBrowserScreenState extends State<SparxBrowserScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('SparxSolver', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text('SparxSolver Mobile', style: TextStyle(fontWeight: FontWeight.bold)),
             Text(_statusText, style: TextStyle(fontSize: 11, color: _statusLevel == 'warn' ? const Color(0xFFF0B35B) : _mutedInk)),
           ],
         ),
         actions: [
           IconButton(
-            icon: Icon(_isAutomationRunning ? Icons.stop_circle : Icons.play_circle, 
-                 color: _isAutomationRunning ? Colors.redAccent : const Color(0xFF4ADE80)),
-            onPressed: _toggleAutomation,
-          ),
-          Builder(
-            builder: (context) => IconButton(
-              icon: Stack(
-                children: [
-                  const Icon(Icons.terminal),
-                  if (_logs.isNotEmpty)
-                    Positioned(
-                      right: 0,
-                      top: 0,
-                      child: Container(
-                        padding: const EdgeInsets.all(2),
-                        decoration: const BoxDecoration(color: _accent, shape: BoxShape.circle),
-                        constraints: const BoxConstraints(minWidth: 10, minHeight: 10),
-                      ),
-                    )
-                ],
-              ),
-              onPressed: () => Scaffold.of(context).openDrawer(),
-              tooltip: 'Live Logs',
+            icon: Stack(
+              children: [
+                const Icon(Icons.terminal),
+                if (_logs.isNotEmpty)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: const BoxDecoration(color: _accent, shape: BoxShape.circle),
+                      constraints: const BoxConstraints(minWidth: 10, minHeight: 10),
+                    ),
+                  )
+              ],
             ),
-          ),
-          Builder(
-            builder: (context) => IconButton(
-              icon: const Icon(Icons.settings),
-              onPressed: () => Scaffold.of(context).openEndDrawer(),
-              tooltip: 'Settings & Keys',
-            ),
+            onPressed: _showLogsWindow,
+            tooltip: 'App Logs Window',
           ),
         ],
       ),
-      drawer: Drawer(
-        backgroundColor: _background,
-        child: SafeArea(
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                color: _panel,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.terminal, color: _accent),
-                        const SizedBox(width: 8),
-                        const Text('Live Logs', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
-                        const SizedBox(width: 6),
-                        Text('(${_logs.length})', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline, color: Colors.grey),
-                          onPressed: () => setState(() => _logs.clear()),
-                          tooltip: 'Clear Logs',
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: Colors.white70),
-                          onPressed: () => Navigator.of(context).pop(),
-                        ),
-                      ],
-                    )
-                  ],
-                ),
-              ),
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(8.0),
-                  child: ListView.builder(
-                    itemCount: _logs.length,
-                    itemBuilder: (context, index) {
-                      final logText = _logs[index];
-                      Color logColor = Colors.white70;
-                      if (logText.contains('[JS ERR]') || logText.contains('Error')) {
-                        logColor = Colors.redAccent;
-                      } else if (logText.contains('[JS WARN]')) {
-                        logColor = const Color(0xFFF0B35B);
-                      } else if (logText.contains('🤖 AI Tool:')) {
-                        logColor = const Color(0xFF72B7D8);
-                      } else if (logText.contains('✓ Question Finished')) {
-                        logColor = const Color(0xFF72C7C1);
-                      }
+      body: IndexedStack(
+        index: _currentTab,
+        children: [
+          // Webview 1: Sparx Browser View
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: WebUri("https://sparxmaths.uk")),
+            onWebViewCreated: (controller) {
+              _browserViewController = controller;
+              controller.addJavaScriptHandler(
+                handlerName: 'SparxBridge',
+                callback: (args) {
+                  final data = args[0];
+                  final String type = data['type'] ?? '';
+                  final payload = data['payload'] ?? {};
 
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2.0),
-                        child: SelectableText(
-                          logText,
-                          style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: logColor),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      endDrawer: Drawer(
-        backgroundColor: _panel,
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: ListView(
-            children: [
-              const Text('AI Settings', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-              const SizedBox(height: 6),
-              const Text('Enter one or more API keys (one per line):', style: TextStyle(fontSize: 12, color: Colors.grey)),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _apiKeyController,
-                maxLines: _showApiKeys ? 4 : 1,
-                obscureText: !_showApiKeys,
-                style: const TextStyle(fontSize: 12, fontFamily: 'monospace', color: _ink),
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  hintText: 'AIzaSy...',
-                  fillColor: _background,
-                  filled: true,
-                  suffixIcon: Icon(Icons.key),
-                ),
-              ),
-              CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Show API keys', style: TextStyle(fontSize: 12)),
-                value: _showApiKeys,
-                onChanged: (value) => setState(() => _showApiKeys = value ?? false),
-              ),
-              const Divider(),
-              _settingField('Minimum thinking delay (seconds)', 'minDelaySeconds'),
-              _settingField('Maximum thinking delay (seconds)', 'maxDelaySeconds'),
-              _settingField('Gemini request timeout (seconds)', 'requestTimeoutSeconds'),
-              _settingField('Wait between retries (seconds)', 'retryDelaySeconds'),
-              _settingField('Maximum request attempts', 'maxRequestAttempts'),
-              const SizedBox(height: 20),
-              ElevatedButton.icon(
-                onPressed: _toggleAutomation,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _isAutomationRunning ? const Color(0xFFB94A52) : _accentStrong,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
-                icon: Icon(_isAutomationRunning ? Icons.stop : Icons.play_arrow),
-                label: Text(_isAutomationRunning ? 'Stop Automation' : 'Start Automation'),
-              ),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Bookwork', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  Row(children: [
-                    IconButton(onPressed: _showBookworkExport, icon: const Icon(Icons.copy, size: 19), tooltip: 'Copy Markdown'),
-                    IconButton(onPressed: _clearBookworks, icon: const Icon(Icons.delete_sweep, size: 19), tooltip: 'Clear all'),
-                  ]),
-                ],
-              ),
-              const Divider(),
-              if (_bookworks.isEmpty) const Text('No saved bookworks yet.', style: TextStyle(fontSize: 12, color: Colors.grey)),
-              ..._bookworks.map((b) => Card(
-                color: _panelRaised,
-                child: ExpansionTile(
-                  title: Text('Code ${b['code']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  subtitle: MathMarkup('Answer: ${b['answer']}', fontSize: 12, color: const Color(0xFF72C7C1)),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                    onPressed: () => _deleteBookwork('${b['code']}'),
-                  ),
-                  children: [
-                    if ((b['working'] as String? ?? '').isNotEmpty)
-                      Padding(padding: const EdgeInsets.all(12), child: MathMarkup(b['working'] as String)),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                      child: TextFormField(
-                        initialValue: b['info'] as String? ?? '',
-                        maxLines: 3,
-                        decoration: const InputDecoration(labelText: 'Notes', border: OutlineInputBorder()),
-                        onChanged: (value) => b['info'] = value,
-                        onFieldSubmitted: (value) => _saveBookworkInfo('${b['code']}', value),
-                      ),
-                    ),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(onPressed: () => _saveBookworkInfo('${b['code']}', b['info'] as String? ?? ''), child: const Text('Save notes')),
-                    ),
-                  ],
-                ),
-              )),
-            ],
-          ),
-        ),
-      ),
-      body: InAppWebView(
-        initialUrlRequest: URLRequest(url: WebUri("https://sparxmaths.uk")),
-        onWebViewCreated: (controller) {
-          _webViewController = controller;
-
-          // Set up JavaScript bridge handler
-          controller.addJavaScriptHandler(
-            handlerName: 'SparxBridge',
-            callback: (args) {
-              final data = args[0];
-              final String type = data['type'] ?? '';
-              final payload = data['payload'] ?? {};
-
-              if (type == 'log') {
-                _addLog(payload['text'] ?? '', payload['level'] ?? 'info');
-              } else if (type == 'bookwork_add') {
-                _handleBookworkSync({'bookworks': [..._bookworks, payload]});
-              } else if (type == 'bookwork_sync') {
-                _handleBookworkSync(payload);
-              } else if (type == 'status') {
-                setState(() {
-                  _statusText = payload['text'] ?? 'Idle';
-                  _statusLevel = payload['level'] ?? 'info';
-                });
-              }
+                  if (type == 'log') {
+                    _addLog(payload['text'] ?? '', payload['level'] ?? 'info');
+                  } else if (type == 'bookwork_add') {
+                    _handleBookworkSync({'bookworks': [..._bookworks, payload]});
+                  } else if (type == 'bookwork_sync') {
+                    _handleBookworkSync(payload);
+                  } else if (type == 'status') {
+                    setState(() {
+                      _statusText = payload['text'] ?? 'Idle';
+                      _statusLevel = payload['level'] ?? 'info';
+                    });
+                  }
+                },
+              );
             },
-          );
-        },
-        onLoadStop: (controller, url) async {
-          // Inject embedded Sparx Engine JS script into page context
-          final jsCode = await rootBundle.loadString('assets/sparx_engine_bridge.js');
-          await controller.evaluateJavascript(source: jsCode);
-          await controller.evaluateJavascript(source: 'SparxEngine.setBookworks(${jsonEncode(_bookworks)});');
-          _addLog('Loaded Sparx Engine into page.', 'info');
-        },
+            onLoadStop: (controller, url) async {
+              final jsCode = await rootBundle.loadString('assets/sparx_engine_bridge.js');
+              await controller.evaluateJavascript(source: jsCode);
+              await controller.evaluateJavascript(source: 'SparxEngine.setBookworks(${jsonEncode(_bookworks)});');
+              _addLog('Loaded Sparx Engine into browser webview.', 'info');
+            },
+          ),
+          
+          // Webview 2: Extension Sidepanel View (AI Settings & Bookwork Dashboard)
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: WebUri("http://localhost:3000/sidepanel.html")),
+            onWebViewCreated: (controller) {},
+          ),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentTab,
+        onTap: (index) => setState(() => _currentTab = index),
+        backgroundColor: _panel,
+        selectedItemColor: _accent,
+        unselectedItemColor: _mutedInk,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.public),
+            label: 'Sparx Browser',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.extension),
+            label: 'Extension Dashboard',
+          ),
+        ],
       ),
     );
   }

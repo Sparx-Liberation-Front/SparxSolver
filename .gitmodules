@@ -1,0 +1,6 @@
+[submodule "extension"]
+	path = extension
+	url = https://github.com/Sparx-Liberation-Front/extension
+[submodule "mobile_app/assets/extension"]
+	path = mobile_app/assets/extension
+	url = https://github.com/Sparx-Liberation-Front/extension

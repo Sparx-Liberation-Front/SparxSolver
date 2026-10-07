@@ -2,44 +2,40 @@
   "manifest_version": 3,
   "name": "Sparx Solver",
   "version": "1.0.0",
-
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "sparx-solver@sparxsolver.local",
+      "strict_min_version": "109.0"
+    }
+  },
   "permissions": [
     "storage",
     "tabs",
-    "activeTab",
-    "sidePanel"
+    "activeTab"
   ],
-
-  "host_permissions": [
-    "http://localhost/*"
-  ],
-
   "action": {
     "default_title": "Open Sparx Solver",
-    "default_icon": {
-      "400": "logo.png"
-    }
+    "default_icon": "logo.png",
+    "default_popup": "sidepanel.html"
   },
-
-  "side_panel": {
-    "default_path": "sidepanel.html"
+  "sidebar_action": {
+    "default_panel": "sidepanel.html",
+    "default_title": "Sparx Solver"
   },
-
   "icons": {
     "400": "logo.png"
   },
-
   "content_scripts": [
     {
       "matches": [
-        "https://maths.sparx-learning.com/*"
+        "https://maths.sparx-learning.com/*",
+        "https://*.sparxmaths.uk/*"
       ],
       "js": [
         "content.js"
       ]
     }
   ],
-
   "background": {
     "service_worker": "background.js"
   }
