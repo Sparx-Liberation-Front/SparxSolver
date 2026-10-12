@@ -20,6 +20,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build extension
+        working-directory: .
+        run: |
+          npm install --prefix mobile_app/assets/extension
+          npm run build --prefix mobile_app/assets/extension
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -63,6 +76,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build extension
+        working-directory: .
+        run: |
+          npm install --prefix mobile_app/assets/extension
+          npm run build --prefix mobile_app/assets/extension
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2

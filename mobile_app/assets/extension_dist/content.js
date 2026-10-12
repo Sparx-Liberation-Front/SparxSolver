@@ -1,1 +1,0 @@
-chrome.runtime.onMessage.addListener(e=>{e.type===`START`&&console.log(`Automation started`)});
