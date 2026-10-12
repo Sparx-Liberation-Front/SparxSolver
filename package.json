@@ -8,7 +8,7 @@
     "build:extension": "npm run build --prefix extension",
     "build:server": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist_server/index.js --packages=external",
     "build:bridge": "esbuild src/browserBridge.ts --bundle --platform=browser --target=es2020 --outfile=mobile_app/assets/sparx_engine_bridge.js",
-    "build:all": "npm run build:server && npm run build:bridge"
+    "build:all": "npm run build:extension && npm run build:server && npm run build:bridge"
   },
   "keywords": [],
   "author": "",

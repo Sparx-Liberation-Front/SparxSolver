@@ -19,6 +19,16 @@ import { setContext } from './server.ts';
     extensionPath = path.resolve(process.cwd(), 'extension/dist');
   }
 
+  if (!fs.existsSync(extensionPath)) {
+    console.log('[SparxSolver] Extension build not found at extension/dist. Building extension automatically...');
+    try {
+      const { execSync } = require('child_process');
+      execSync('npm run build:extension', { stdio: 'inherit' });
+    } catch (e) {
+      console.error('[SparxSolver] Failed to build extension automatically:', e);
+    }
+  }
+
   const context = await chromium.launchPersistentContext('./browser-data', {
     headless: false,
     viewport: null,
