@@ -55,7 +55,7 @@ jobs:
           flutter test
 
       - name: Build Android release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --no-split-per-abi
 
       - name: Rename Android artifact
         run: mv build/app/outputs/flutter-apk/app-release.apk sparxsolver-installer-android.apk

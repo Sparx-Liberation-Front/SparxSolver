@@ -148,7 +148,7 @@ jobs:
           flutter test
 
       - name: Build Android APK
-        run: flutter build apk --release --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}"
+        run: flutter build apk --release --no-split-per-abi --build-name="${{ inputs.version }}" --build-number="${{ inputs.build_number }}"
 
       - name: Rename Android artifact
         run: mv build/app/outputs/flutter-apk/app-release.apk "sparxsolver-installer-android.apk"
